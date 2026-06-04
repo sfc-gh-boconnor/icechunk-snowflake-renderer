@@ -402,12 +402,14 @@ app.post('/api/save-table', async (req: Request, res: Response) => {
     snapshot_id,
     variables,
     pivoted,
+    dataset,
   } = req.body as {
     table_name?: string
     lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number
     snapshot_id?: string | null
     variables?: string[]
     pivoted?: boolean
+    dataset?: string
   }
 
   // Validate inputs
@@ -431,6 +433,9 @@ app.post('/api/save-table', async (req: Request, res: Response) => {
   const lonMax  = Number(lon_max)
 
   // Build SQL — either UNION ALL long format or pivoted wide format
+  // UK dataset uses ICECHUNK_SLICE_UK (LAEA→WGS84 coords stored at ingest).
+  const isUk = dataset === 'uk'
+  const sliceFn = isUk ? 'ICECHUNK_SLICE_UK' : 'ICECHUNK_SLICE'
   const branches = variables.map(v => {
     const safeVar = v.replace(/[^A-Za-z0-9_]/g, '')
     return `
@@ -443,7 +448,7 @@ app.post('/api/save-table', async (req: Request, res: Response) => {
          f.value:value::FLOAT AS value,
          ${snapshotExpr}      AS snapshot_id,
          CURRENT_TIMESTAMP()  AS created_at
-  FROM (SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SLICE(
+  FROM (SELECT ICECHUNK_DB.ICECHUNK.${sliceFn}(
           '${safeVar}', ${latMin}, ${latMax}, ${lonMin}, ${lonMax}, ${snapshotExpr}
         ) AS r) t,
   LATERAL FLATTEN(input => t.r:data) f`

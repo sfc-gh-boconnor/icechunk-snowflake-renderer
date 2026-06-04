@@ -504,6 +504,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           snapshot_id: selectedSnapshot ?? null,
           variables:   variableKeys.filter(v => !v.startsWith('cloud_amount_on_height')),
           pivoted,
+          dataset,
         }),
       })
       const body = await res.json() as { table?: string; row_count?: number; error?: string }
