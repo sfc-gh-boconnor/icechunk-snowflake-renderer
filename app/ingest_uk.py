@@ -61,6 +61,21 @@ def _anon_s3():
 
 
 def latest_uk_run_stamp() -> str:
+    """Find the most recently published UK 2km run in the ASDI bucket."""
+    s3 = _anon_s3()
+    try:
+        result = s3.list_objects_v2(
+            Bucket=SRC_BUCKET, Prefix=SRC_PREFIX + "/",
+            Delimiter="/",
+        )
+        prefixes = [p["Prefix"] for p in result.get("CommonPrefixes", [])]
+        if prefixes:
+            # Prefixes look like "uk-deterministic-2km/20260604T1600Z/"
+            stamps = sorted([p.rstrip("/").split("/")[-1] for p in prefixes])
+            return stamps[-1]  # most recent
+    except Exception as e:
+        logger.warning(f"Could not list bucket for latest run: {e}")
+    # Fallback: current UTC hour
     now = datetime.now(timezone.utc)
     return now.strftime("%Y%m%dT%H00Z")
 
@@ -124,8 +139,8 @@ def ingest_uk(run_stamp: Optional[str] = None) -> dict:
             if ds is not None:
                 datasets[var_name] = ds
 
-    # Fall back up to 3 hours if current run not yet published
-    for offset_h in range(1, 4):
+    # Fall back up to 6 hours if chosen run has no files (race condition)
+    for offset_h in range(1, 7):
         if datasets:
             break
         dt = datetime.strptime(run_stamp, "%Y%m%dT%H00Z").replace(tzinfo=timezone.utc)
