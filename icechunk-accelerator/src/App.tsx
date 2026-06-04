@@ -121,7 +121,7 @@ export default function App() {
             </h1>
             <div className="app-header-actions">
               <span className="badge blue" style={{ fontSize: 11 }}>
-                Met Office Global Det. 10km
+                Met Office Weather
               </span>
               {showAgent && (
                 <button

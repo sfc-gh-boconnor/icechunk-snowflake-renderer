@@ -6,7 +6,8 @@ export interface WeatherPoint {
   value: number
   h3index?: string
   cloud_pct?: number
-  height_m?: number
+  height_m?: number         // level value — either height in metres or pressure in Pa
+  level_units?: string      // "m" | "Pa" — present for UK generic 3D endpoint
 }
 
 export interface MetaResult {
@@ -210,20 +211,109 @@ export const VARIABLES: VariableMeta[] = [
     maxHint: 100,
   },
   {
-    key: 'cloud_amount_on_height_levels',
-    label: 'Cloud by Height',
+    key: 'wind_direction_on_pressure_levels',
+    label: 'Wind Dir (Pressure Levels)',
+    unit: '°',
+    is3D: true,
+    transform: v => v,
+    colorScale: [
+      [30, 100, 200],
+      [80, 160, 230],
+      [180, 210, 240],
+      [230, 230, 200],
+      [240, 180, 80],
+      [200, 80, 40],
+    ],
+    minHint: 0,
+    maxHint: 360,
+  },
+  {
+    key: 'temperature_on_pressure_levels',
+    label: 'Temperature (Pressure Levels)',
+    unit: '°C',
+    is3D: true,
+    transform: v => v - 273.15,
+    colorScale: [
+      [5, 48, 97],
+      [33, 102, 172],
+      [103, 169, 207],
+      [209, 229, 240],
+      [253, 219, 199],
+      [239, 138, 98],
+      [178, 24, 43],
+    ],
+    minHint: -80,
+    maxHint: 40,
+  },
+  {
+    key: 'relative_humidity_on_pressure_levels',
+    label: 'Humidity (Pressure Levels)',
     unit: '%',
     is3D: true,
     transform: v => v * 100,
     colorScale: [
-      [13, 17, 23],
-      [36, 62, 100],
-      [100, 140, 180],
-      [180, 205, 225],
-      [240, 248, 255],
+      [255, 255, 204],
+      [199, 233, 180],
+      [127, 205, 187],
+      [65, 182, 196],
+      [29, 145, 192],
+      [34, 94, 168],
+      [12, 44, 132],
     ],
     minHint: 0,
     maxHint: 100,
+  },
+  {
+    key: 'wind_speed_on_pressure_levels',
+    label: 'Wind Speed (Pressure Levels)',
+    unit: 'm/s',
+    is3D: true,
+    transform: v => v,
+    colorScale: [
+      [240, 248, 255],
+      [150, 220, 150],
+      [255, 220, 50],
+      [255, 140, 0],
+      [200, 0, 0],
+      [100, 0, 150],
+    ],
+    minHint: 0,
+    maxHint: 60,
+  },
+  {
+    key: 'temperature_on_height_levels',
+    label: 'Temperature (Height Levels)',
+    unit: '°C',
+    is3D: true,
+    transform: v => v - 273.15,
+    colorScale: [
+      [5, 48, 97],
+      [33, 102, 172],
+      [103, 169, 207],
+      [209, 229, 240],
+      [253, 219, 199],
+      [239, 138, 98],
+      [178, 24, 43],
+    ],
+    minHint: -60,
+    maxHint: 40,
+  },
+  {
+    key: 'wind_speed_on_height_levels',
+    label: 'Wind Speed (Height Levels)',
+    unit: 'm/s',
+    is3D: true,
+    transform: v => v,
+    colorScale: [
+      [240, 248, 255],
+      [150, 220, 150],
+      [255, 220, 50],
+      [255, 140, 0],
+      [200, 0, 0],
+      [100, 0, 150],
+    ],
+    minHint: 0,
+    maxHint: 50,
   },
 ]
 
@@ -264,6 +354,9 @@ export function resolveVariableMeta(key: string): VariableMeta {
   if (k.includes('visibility') || k === 'vis') {
     return { ...VARIABLE_MAP['visibility_at_screen_level'], key, label: key.replace(/_/g, ' ') }
   }
+  if (k.includes('dew') || k.includes('fog') || k.includes('snow') || k.includes('rain')) {
+    return { ...VARIABLE_MAP['lwe_precipitation_rate'], key, label: key.replace(/_/g, ' ') }
+  }
 
   // Generic fallback — auto-range from actual data
   return {
@@ -295,6 +388,53 @@ export const INGEST_FILES: IngestFile[] = [
   { filename: 'cloud_amount_of_medium_cloud.nc',     label: 'Medium cloud',               sizeMb: 2.4,  varKey: 'cloud_amount_of_medium_cloud' },
   { filename: 'cloud_amount_on_height_levels.nc',    label: 'Cloud by height (3D)',       sizeMb: 67.9, varKey: 'cloud_amount_on_height_levels' },
 ]
+
+// ── UK Ingest file catalog ────────────────────────────────────────────────────
+
+export type UkIngestDim = 'surface' | 'height_levels' | 'pressure_levels'
+
+export interface UkIngestFile {
+  filename: string      // ASDI suffix (without run stamp or .nc)
+  zarr_key: string      // key stored in zarr store
+  label: string
+  sizeMb: number
+  dim: UkIngestDim
+}
+
+export const UK_INGEST_FILES: UkIngestFile[] = [
+  // ── Surface (2D) ──────────────────────────────────────────────────────
+  { filename: 'temperature_at_screen_level',       zarr_key: 'air_temperature',                label: 'Temperature (screen level)',   sizeMb: 7.5,  dim: 'surface' },
+  { filename: 'precipitation_rate',                zarr_key: 'lwe_precipitation_rate',          label: 'Precipitation rate',           sizeMb: 2.2,  dim: 'surface' },
+  { filename: 'wind_speed_at_10m',                 zarr_key: 'wind_speed_at_10m',               label: 'Wind speed (10m)',             sizeMb: 7.5,  dim: 'surface' },
+  { filename: 'pressure_at_mean_sea_level',        zarr_key: 'air_pressure_at_sea_level',       label: 'Pressure (sea level)',         sizeMb: 8.0,  dim: 'surface' },
+  { filename: 'relative_humidity_at_screen_level', zarr_key: 'relative_humidity',               label: 'Relative humidity',            sizeMb: 7.5,  dim: 'surface' },
+  { filename: 'cloud_amount_of_total_cloud',       zarr_key: 'cloud_amount_of_total_cloud',     label: 'Total cloud cover',            sizeMb: 3.4,  dim: 'surface' },
+  { filename: 'visibility_at_screen_level',        zarr_key: 'visibility_at_screen_level',      label: 'Visibility',                   sizeMb: 8.0,  dim: 'surface' },
+  { filename: 'cloud_amount_of_high_cloud',        zarr_key: 'cloud_amount_of_high_cloud',      label: 'High cloud',                   sizeMb: 2.5,  dim: 'surface' },
+  { filename: 'cloud_amount_of_low_cloud',         zarr_key: 'cloud_amount_of_low_cloud',       label: 'Low cloud',                    sizeMb: 3.7,  dim: 'surface' },
+  { filename: 'cloud_amount_of_medium_cloud',      zarr_key: 'cloud_amount_of_medium_cloud',    label: 'Medium cloud',                 sizeMb: 2.4,  dim: 'surface' },
+  { filename: 'wind_gust_at_10m',                  zarr_key: 'wind_gust_at_10m',                label: 'Wind gust (10m)',              sizeMb: 7.5,  dim: 'surface' },
+  { filename: 'temperature_of_dew_point_at_screen_level', zarr_key: 'dew_point_temperature',    label: 'Dew point temperature',        sizeMb: 7.5,  dim: 'surface' },
+  { filename: 'snowfall_rate',                     zarr_key: 'snowfall_rate',                   label: 'Snowfall rate',                sizeMb: 2.0,  dim: 'surface' },
+  { filename: 'rainfall_rate',                     zarr_key: 'rainfall_rate',                   label: 'Rainfall rate',                sizeMb: 2.0,  dim: 'surface' },
+  { filename: 'fog_fraction_at_screen_level',      zarr_key: 'fog_fraction',                    label: 'Fog fraction',                 sizeMb: 2.0,  dim: 'surface' },
+
+  // ── Height levels (3D) ────────────────────────────────────────────────
+  { filename: 'cloud_amount_on_height_levels',     zarr_key: 'cloud_amount_on_height_levels',   label: 'Cloud by height (3D)',         sizeMb: 70.0, dim: 'height_levels' },
+  { filename: 'temperature_on_height_levels',      zarr_key: 'temperature_on_height_levels',    label: 'Temperature by height (3D)',   sizeMb: 70.0, dim: 'height_levels' },
+  { filename: 'wind_speed_on_height_levels',       zarr_key: 'wind_speed_on_height_levels',     label: 'Wind speed by height (3D)',    sizeMb: 70.0, dim: 'height_levels' },
+
+  // ── Pressure levels (3D) ──────────────────────────────────────────────
+  { filename: 'temperature_on_pressure_levels',           zarr_key: 'temperature_on_pressure_levels',           label: 'Temperature by pressure (3D)',    sizeMb: 70.0, dim: 'pressure_levels' },
+  { filename: 'relative_humidity_on_pressure_levels',     zarr_key: 'relative_humidity_on_pressure_levels',     label: 'Humidity by pressure (3D)',       sizeMb: 70.0, dim: 'pressure_levels' },
+  { filename: 'wind_speed_on_pressure_levels',            zarr_key: 'wind_speed_on_pressure_levels',            label: 'Wind speed by pressure (3D)',     sizeMb: 70.0, dim: 'pressure_levels' },
+  { filename: 'wind_direction_on_pressure_levels',        zarr_key: 'wind_direction_on_pressure_levels',        label: 'Wind direction by pressure (3D)', sizeMb: 70.0, dim: 'pressure_levels' },
+]
+
+/** Default UK selection: all surface variables */
+export const UK_INGEST_DEFAULTS: Set<string> = new Set(
+  UK_INGEST_FILES.filter(f => f.dim === 'surface').map(f => f.filename)
+)
 
 // ── Bounding box presets ──────────────────────────────────────────────────────
 
@@ -384,6 +524,7 @@ export const DATASETS: DatasetConfig[] = [
 
 /** Variables available in the UK 2km dataset */
 export const UK_VARIABLES: string[] = [
+  // surface
   'air_temperature',
   'lwe_precipitation_rate',
   'wind_speed_at_10m',
@@ -391,4 +532,21 @@ export const UK_VARIABLES: string[] = [
   'relative_humidity',
   'cloud_amount_of_total_cloud',
   'visibility_at_screen_level',
+  'cloud_amount_of_high_cloud',
+  'cloud_amount_of_low_cloud',
+  'cloud_amount_of_medium_cloud',
+  'wind_gust_at_10m',
+  'dew_point_temperature',
+  'snowfall_rate',
+  'rainfall_rate',
+  'fog_fraction',
+  // 3D height levels
+  'cloud_amount_on_height_levels',
+  'temperature_on_height_levels',
+  'wind_speed_on_height_levels',
+  // 3D pressure levels
+  'temperature_on_pressure_levels',
+  'relative_humidity_on_pressure_levels',
+  'wind_speed_on_pressure_levels',
+  'wind_direction_on_pressure_levels',
 ]

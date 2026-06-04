@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { Cloud, Download, CheckCircle, AlertCircle, Loader } from 'lucide-react'
 import { triggerIngest, sfQuery } from '../shared/helpers'
-import { INGEST_FILES, MetaResult } from '../types'
+import { INGEST_FILES, UK_INGEST_FILES, UK_INGEST_DEFAULTS, UkIngestDim, MetaResult } from '../types'
 import { formatRunStamp } from '../shared/format'
 
 type Status = 'idle' | 'loading' | 'done' | 'error'
@@ -46,6 +46,23 @@ export default function DataLoader() {
   const [ukResult, setUkResult] = useState<SeedResult | null>(null)
   const [ukMeta, setUkMeta] = useState<MetaResult | null>(null)
   const [loadingUkMeta, setLoadingUkMeta] = useState(false)
+  const [selectedUkFiles, setSelectedUkFiles] = useState<Set<string>>(new Set(UK_INGEST_DEFAULTS))
+
+  const ukTotalMb = UK_INGEST_FILES
+    .filter(f => selectedUkFiles.has(f.filename))
+    .reduce((s, f) => s + f.sizeMb, 0)
+
+  const toggleUkFile = (filename: string) => {
+    setSelectedUkFiles(prev => {
+      const next = new Set(prev)
+      if (next.has(filename)) next.delete(filename)
+      else next.add(filename)
+      return next
+    })
+  }
+  const selectUkAll     = () => setSelectedUkFiles(new Set(UK_INGEST_FILES.map(f => f.filename)))
+  const selectUkNone    = () => setSelectedUkFiles(new Set())
+  const selectUkSurface = () => setSelectedUkFiles(new Set(UK_INGEST_DEFAULTS))
 
   const runStamp = `${runDate}T${runTime}`
   const totalMb = INGEST_FILES
@@ -117,7 +134,11 @@ export default function DataLoader() {
     setUkStatus('loading')
     setUkResult(null)
     try {
-      const resp = await fetch('/api/ingest_uk', { method: 'POST' })
+      const resp = await fetch('/api/ingest_uk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selectedFiles: Array.from(selectedUkFiles) }),
+      })
       const json = await resp.json() as SeedResult & { error?: string }
       if (!resp.ok || json.error) {
         setUkStatus('error')
@@ -406,23 +427,64 @@ export default function DataLoader() {
             )}
           </div>
 
+          {/* UK variable selector */}
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+              <div className="panel-title" style={{ marginBottom: 0 }}>Variables to Load</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="btn secondary small" onClick={selectUkSurface}>Surface</button>
+                <button className="btn secondary small" onClick={selectUkAll}>All</button>
+                <button className="btn secondary small" onClick={selectUkNone}>None</button>
+              </div>
+            </div>
+            {(['surface', 'height_levels', 'pressure_levels'] as UkIngestDim[]).map(dim => {
+              const dimFiles = UK_INGEST_FILES.filter(f => f.dim === dim)
+              const dimLabel: Record<UkIngestDim, string> = {
+                surface:         'Surface (2D)',
+                height_levels:   'Height Levels (3D)',
+                pressure_levels: 'Pressure Levels (3D)',
+              }
+              return (
+                <div key={dim} style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>
+                    {dimLabel[dim]}
+                  </div>
+                  <div className="checkbox-list">
+                    {dimFiles.map(f => (
+                      <label key={f.filename} className="checkbox-item">
+                        <input type="checkbox" checked={selectedUkFiles.has(f.filename)} onChange={() => toggleUkFile(f.filename)} />
+                        <span>{f.label}</span>
+                        {f.dim !== 'surface' && <span className="badge dim-3d" style={{ fontSize: 10, marginLeft: 4 }}>3D</span>}
+                        <span className="var-size">{f.sizeMb.toFixed(0)} MB</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
+              Selected: {selectedUkFiles.size} variables — ~{ukTotalMb.toFixed(0)} MB download
+            </div>
+          </div>
+
           {/* UK seed button */}
           <div className="panel">
             <div style={{ marginBottom: 10, fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-              Loads the latest available hourly run automatically. Variables included:
-              {' '}air temperature, precipitation rate, 10m wind speed, sea-level pressure,
-              relative humidity, cloud cover, and visibility.
+              Loads the latest available hourly run automatically.
+              {selectedUkFiles.size === 0
+                ? ' No variables selected.'
+                : ` ${selectedUkFiles.size} variable${selectedUkFiles.size !== 1 ? 's' : ''} selected (~${ukTotalMb.toFixed(0)} MB total download).`}
             </div>
             <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
               <button
                 className="btn primary"
                 onClick={handleLoadUk}
-                disabled={ukStatus === 'loading'}
+                disabled={ukStatus === 'loading' || selectedUkFiles.size === 0}
                 style={{ display: 'flex', alignItems: 'center', gap: 8 }}
               >
                 {ukStatus === 'loading'
                   ? <><Loader size={15} style={{ animation: 'spin 0.7s linear infinite' }} /> Loading…</>
-                  : <><Download size={15} /> Seed UK 2km Data</>}
+                  : <><Download size={15} /> Seed UK 2km Data ({selectedUkFiles.size})</>}
               </button>
               {ukStatus === 'loading' && (
                 <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>

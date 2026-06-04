@@ -1,6 +1,6 @@
 ---
 name: icechunk-accelerator
-description: "Deploy the IceChunk Accelerator on Snowflake Container Services (SPCS). Covers AWS S3 and IAM setup, Snowflake object creation (database, compute pool, secrets, EAIs, external functions), building/pushing Docker images with patch versioning, deploying two SPCS services (Python FastAPI backend + React/Express frontend), and loading Met Office ASDI weather data into an IceChunk Zarr store. Use when: deploying IceChunk Accelerator, setting up IceChunk SPCS, deploying Met Office weather data pipeline, reproducing IceChunk deployment, icechunk accelerator, weather data SPCS, IceChunk zarr snowflake."
+description: "Deploy the IceChunk Accelerator on Snowflake Container Services (SPCS). Covers AWS S3 and IAM setup, Snowflake object creation (database, compute pool, secrets, EAIs, service functions), building/pushing Docker images with patch versioning, deploying two SPCS services (Python FastAPI backend + React/Express frontend), loading Met Office ASDI weather data (Global 10km + UK 2km with surface and 3D pressure/height level variables) into IceChunk Zarr stores, and creating a Cortex Agent for natural-language weather Q&A. Use when: deploying IceChunk Accelerator, setting up IceChunk SPCS, deploying Met Office weather data pipeline, reproducing IceChunk deployment, icechunk accelerator, weather data SPCS, IceChunk zarr snowflake."
 ---
 
 # IceChunk Accelerator — SPCS Deployment
@@ -8,8 +8,8 @@ description: "Deploy the IceChunk Accelerator on Snowflake Container Services (S
 End-to-end deployment of a weather data visualisation app on Snowflake Container Services.
 
 **Architecture:**
-- `icechunk-service` — Python FastAPI backend: reads/writes IceChunk Zarr store on S3, serves slice queries and Met Office ASDI ingest via Snowflake service functions
-- `icechunk-accelerator` — React/Vite + Express frontend: DeckGL map with H3 hexagon or scatter-point rendering, CARTO dark basemap, snapshot date picker, region presets
+- `icechunk-service` — Python FastAPI backend: reads/writes IceChunk Zarr stores on S3, serves global and UK slice queries, 3D level slices (height + pressure), Met Office ASDI ingest
+- `icechunk-accelerator` — React/Vite + Express frontend: DeckGL map with H3 hexagon and native grid rendering, level slider for 3D vars, dataset toggle (Global 10km / UK 2km), DataLoader with per-variable selector, Cortex Agent chat panel
 
 ---
 
@@ -38,15 +38,19 @@ End-to-end deployment of a weather data visualisation app on Snowflake Container
 ```
 Step 0: AWS setup (S3 bucket + IAM user + access keys)
     ↓
-Step 1: Snowflake setup (DB, pool, secrets, EAIs, functions)
+Step 1: Snowflake setup (DB, pool, secrets, EAIs, all service functions)
     ↓
 Step 2: Build & push Docker images
     ↓
 Step 3: Deploy SPCS services
     ↓
-Step 4: Load Met Office data
+Step 4: Load global Met Office data
     ↓
-Step 5: Verify
+Step 5: Create Cortex Agent (WEATHER_AGENT)
+    ↓
+Step 6: Verify
+    ↓
+Step 7: (Optional) Load UK 2km data with variable selector
 ```
 
 ---
@@ -81,7 +85,7 @@ This creates:
 snow sql -f scripts/01_snowflake_setup.sql -c <CONNECTION>
 ```
 
-Before running, fill in the two AWS secrets at the top of the file with the keys from Step 0:
+Before running, fill in the two AWS secrets at the top of the file:
 ```sql
 CREATE SECRET ICECHUNK_DB.ICECHUNK.AWS_ACCESS_KEY_ID     TYPE = GENERIC_STRING SECRET_STRING = '<key id>';
 CREATE SECRET ICECHUNK_DB.ICECHUNK.AWS_SECRET_ACCESS_KEY  TYPE = GENERIC_STRING SECRET_STRING = '<secret>';
@@ -92,8 +96,8 @@ This creates:
 - `XSMALL` warehouse (SMALL size)
 - `ICECHUNK_COMPUTE_POOL` (CPU_X64_XS)
 - `ICECHUNK_REPO` image repository
-- `ICECHUNK_S3_EAI`, `MET_OFFICE_ASDI_EAI`, `FLEET_INTEL_MAP_TILES_EAI` network rules and EAIs
-- All 6 service functions: `ICECHUNK_HEALTH`, `ICECHUNK_META`, `ICECHUNK_SEED`, `ICECHUNK_SLICE`, `ICECHUNK_SLICE_H3`, `ICECHUNK_CLOUD_AT_LEVEL`
+- `ICECHUNK_S3_EAI`, `MET_OFFICE_ASDI_EAI`, `FLEET_INTEL_MAP_TILES_EAI` network rules + EAIs
+- **All service functions** for global + UK 2km (see function list below)
 
 Get the image registry URL (needed for Step 2):
 ```sql
@@ -110,8 +114,6 @@ SHOW COMPUTE POOLS LIKE 'ICECHUNK_COMPUTE_POOL';
 
 ### Step 2: Build & Push Docker Images
 
-**Goal:** Build both containers and push them to the Snowflake registry with a versioned tag.
-
 From the project root (where `build.sh` and `VERSION` live):
 
 ```bash
@@ -122,15 +124,13 @@ snow spcs image-registry login --connection <CONNECTION>
 bash build.sh --bump patch
 ```
 
-This tags each image as both `:latest` and `:<VERSION>` (e.g. `:1.0.5`).
-
-To rebuild only one service after a targeted change:
+To rebuild only one service:
 ```bash
 bash build.sh --service-only --bump patch   # Python backend only
-bash build.sh --accel-only  --bump patch   # React frontend only
+bash build.sh --accel-only  --bump patch    # React frontend only
 ```
 
-**If h5py build fails:** Ensure the Dockerfile has `libhdf5-dev pkg-config` in the apt install step before `pip install --prefer-binary -r requirements.txt`.
+**If h5py build fails:** Ensure the Dockerfile has `libhdf5-dev pkg-config` before `pip install --prefer-binary -r requirements.txt`.
 
 ---
 
@@ -141,10 +141,7 @@ bash build.sh --accel-only  --bump patch   # React frontend only
 snow sql -f scripts/03_deploy_services.sql -c <CONNECTION>
 ```
 
-This creates both services and applies the EAIs.
-
 **⚠️ CRITICAL — EAIs ALWAYS reset on spec change:**
-`ALTER SERVICE FROM SPECIFICATION` silently drops `EXTERNAL_ACCESS_INTEGRATIONS`. The script handles this, but if you ever manually alter a spec, always re-run:
 ```sql
 ALTER SERVICE ICECHUNK_DB.ICECHUNK.ICECHUNK_SERVICE
   SET EXTERNAL_ACCESS_INTEGRATIONS = (ICECHUNK_S3_EAI, MET_OFFICE_ASDI_EAI);
@@ -168,7 +165,7 @@ SHOW ENDPOINTS IN SERVICE ICECHUNK_ACCELERATOR_SERVICE;
 
 ---
 
-### Step 4: Load Met Office Data
+### Step 4: Load Global Met Office Data
 
 **Run** `scripts/04_load_data.sql`:
 ```bash
@@ -180,26 +177,107 @@ Or trigger manually:
 SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED() AS result;
 ```
 
-Downloads 9 surface variables (~70 MB total) from the public Met Office ASDI S3 bucket and writes them to `s3://icechunk-ro/met_office_global/` as a versioned IceChunk Zarr store. Takes 2-5 minutes.
+Downloads 9 surface variables from the public Met Office ASDI S3 bucket and writes them to `s3://icechunk-ro/met_office_global/`. Takes 2-5 minutes.
 
 Expected result: `"Loaded 9 variables at 1920×2560 grid points (~10km global)"`
 
 ---
 
-### Step 5: Verify
+### Step 5: Create Cortex Agent
+
+**Run** `scripts/05_create_agent.sql`:
+```bash
+snow sql -f scripts/05_create_agent.sql -c <CONNECTION>
+```
+
+Creates:
+- `TOOL_WEATHER_META()` — returns available variables, snapshot, grid
+- `TOOL_WEATHER_SLICE(region, variable, snapshot_id)` — geocodes region via AI_COMPLETE, queries H3 stats
+- `TOOL_WEATHER_SUMMARY(region, snapshot_id)` — full weather summary for a region
+- `WEATHER_AGENT` — Cortex Agent with `models: orchestration: auto`
+- Grants to SYSADMIN, ICECHUNK_DB role, `SNOWFLAKE.CORTEX_USER`
+
+**Model note:** Uses `orchestration: auto`. Never hardcode a model name — it silently returns 0 chars if unavailable.
+
+**Map focus:** Both tool procedures return a `bbox` field in their result. The Express server emits a `map_focus` SSE event which causes the frontend to auto-zoom to the agent's region.
+
+---
+
+### Step 6: Verify
 
 ```sql
 SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_HEALTH();
 SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_META();
 
--- UK bounding box: expect ~9,984 rows
+-- UK bounding box, global dataset: expect ~9,984 rows
 SELECT COUNT(*) FROM (
   SELECT PARSE_JSON(ICECHUNK_DB.ICECHUNK.ICECHUNK_SLICE(
     'air_temperature', 49.0, 61.0, -8.0, 3.0, NULL)):data AS d
 ) t, LATERAL FLATTEN(input => t.d) f;
+
+-- Test agent tool
+CALL ICECHUNK_DB.ICECHUNK.TOOL_WEATHER_META();
 ```
 
-Open the ingress URL in a browser and confirm the DeckGL map shows weather hexagons over the globe.
+Open the ingress URL in a browser. The DeckGL map should show weather hexagons, the `⬡ H3` / `▦ Grid` toggle should be visible, and asking the agent "What's the weather in London?" should return values and auto-zoom the map.
+
+---
+
+### Step 7: Load UK 2km Data (Optional)
+
+The UK 2km dataset covers the British Isles at ~2km resolution with surface and 3D pressure/height level variables.
+
+**In the app**: go to Data Loader → UK 2km tab → select desired variables → click Seed.
+
+**From SQL** (surface only, default):
+```sql
+SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED_UK();
+```
+
+**With specific variables** (pass zarr_key names as JSON array):
+```sql
+SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED_UK_VARS(
+  '["air_temperature","cloud_amount_on_height_levels","temperature_on_pressure_levels"]'
+);
+```
+
+**UK variable catalog** (UK_INGEST_FILES in `types.ts`):
+
+Surface (2D): `air_temperature`, `lwe_precipitation_rate`, `wind_speed_at_10m`, `air_pressure_at_sea_level`, `relative_humidity`, `cloud_amount_of_total_cloud`, `visibility_at_screen_level`, `cloud_amount_of_high_cloud`, `cloud_amount_of_low_cloud`, `cloud_amount_of_medium_cloud`, `wind_gust_at_10m`, `dew_point_temperature`, `snowfall_rate`, `rainfall_rate`, `fog_fraction`
+
+Height levels (3D, ~70 MB each): `cloud_amount_on_height_levels`, `temperature_on_height_levels`, `wind_speed_on_height_levels`
+
+Pressure levels (3D, ~70 MB each): `temperature_on_pressure_levels`, `relative_humidity_on_pressure_levels`, `wind_speed_on_pressure_levels`, `wind_direction_on_pressure_levels`
+
+---
+
+## Snowflake Service Functions
+
+### Global 10km
+
+| Function | Endpoint | Use case |
+|----------|----------|---------|
+| `ICECHUNK_HEALTH()` | `/health` | Readiness |
+| `ICECHUNK_META()` | `/meta` | Variables, snapshot, grid |
+| `ICECHUNK_SEED()` | `/seed` | Ingest latest global run |
+| `ICECHUNK_SLICE(var, lat_min, lat_max, lon_min, lon_max, snapshot_id)` | `/snowflake/slice` | Raw grid points |
+| `ICECHUNK_SLICE_H3(var, lat_min, lat_max, lon_min, lon_max, snapshot_id, h3_res)` | `/snowflake/slice_h3` | H3 cells |
+| `ICECHUNK_CLOUD_AT_LEVEL(level, lat_min, lat_max, lon_min, lon_max, snapshot_id)` | `/snowflake/cloud_level` | Cloud at height (raw) |
+| `ICECHUNK_CLOUD_AT_LEVEL_H3(level, lat_min, lat_max, lon_min, lon_max, snapshot_id, h3_res)` | `/snowflake/cloud_level_h3` | Cloud at height (H3) |
+
+### UK 2km
+
+| Function | Endpoint | Use case |
+|----------|----------|---------|
+| `ICECHUNK_META_UK()` | `/meta_uk` | UK variables, snapshot, grid |
+| `ICECHUNK_SEED_UK()` | `/seed_uk` | Ingest UK surface vars |
+| `ICECHUNK_SEED_UK_VARS(vars_json)` | `/seed_uk_vars` | Ingest selected UK vars |
+| `ICECHUNK_SLICE_UK(var, lat_min, lat_max, lon_min, lon_max, snapshot_id)` | `/snowflake/slice_uk` | UK raw grid points |
+| `ICECHUNK_SLICE_H3_UK(var, lat_min, lat_max, lon_min, lon_max, snapshot_id, h3_res)` | `/snowflake/slice_h3_uk` | UK H3 cells |
+| `ICECHUNK_LEVEL_SLICE_UK(var, level, lat_min, lat_max, lon_min, lon_max, snapshot_id)` | `/snowflake/level_slice_uk` | Any UK 3D var at level (raw) |
+| `ICECHUNK_LEVEL_SLICE_H3_UK(var, level, lat_min, lat_max, lon_min, lon_max, snapshot_id, h3_res)` | `/snowflake/level_slice_h3_uk` | Any UK 3D var at level (H3) |
+
+All functions return VARIANT. Use `LATERAL FLATTEN(input => result:data)` to expand rows.
 
 ---
 
@@ -207,16 +285,19 @@ Open the ingress URL in a browser and confirm the DeckGL map shows weather hexag
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Map background is black | CARTO `dark_matter_nolabels` path deprecated (returns 502) | Tile proxy in `server/index.ts` must use `dark_all` path |
-| `getaddrinfo ENOTFOUND <account>.snowflakecomputing.com` | `SNOWFLAKE_HOST` explicitly set in accelerator spec | Remove `SNOWFLAKE_HOST` from spec — SPCS auto-injects the correct internal hostname |
-| `S3 DNS error / ENOTFOUND s3.us-east-1.amazonaws.com` | `AWS_DEFAULT_REGION` set to wrong region | Set `AWS_DEFAULT_REGION: "us-west-2"` in the backend service spec (matches bucket + EAI network rule) |
-| `Endpoint 'api' does not exist` | Service functions reference old endpoint name | Recreate functions with `ENDPOINT = 'http-endpoint'` (not `'api'`) |
-| `tag already exists / immutable` from ICECHUNK_SEED | IceChunk tags are immutable; repeat calls try to create `v1.0` again | Handled by `_create_tag_safe()` in `ingest.py` — can be safely ignored |
-| `No files downloaded for run YYYYMMDDTHH00Z` | ASDI bucket lags 6-12 hours | Met Office publishes runs with a delay; try yesterday's date in `latest_run_stamp()` |
-| Only 6 data points visible | IceChunk store has old 5° synthetic seeder data as latest snapshot | Run `ICECHUNK_SEED()` again to ingest real 10km data |
-| Partition data shows empty rows | Snowflake partition GETs omit `resultSetMetaData` | `server/index.ts` `fetchPartition()` must pass `knownCols` to all partition GETs |
-| `h5py pip install fails` (exit code 2) | Missing system HDF5 libraries in Docker image | Add `libhdf5-dev pkg-config` to apt install in Dockerfile; use `--prefer-binary` flag for pip |
-| EAI not applying after spec update | `ALTER SERVICE FROM SPECIFICATION` resets EAIs | Always run `ALTER SERVICE SET EXTERNAL_ACCESS_INTEGRATIONS` separately after every spec change |
+| Map background is black | CARTO `dark_matter_nolabels` deprecated (502) | Use `dark_all` in tile proxy (`server/index.ts`) |
+| `ENOTFOUND <account>.snowflakecomputing.com` | `SNOWFLAKE_HOST` set in accelerator spec | Remove it — SPCS auto-injects the internal hostname |
+| S3 DNS error / `ENOTFOUND s3.us-east-1.amazonaws.com` | Wrong `AWS_DEFAULT_REGION` | Set `AWS_DEFAULT_REGION: "us-west-2"` in backend spec |
+| `Endpoint 'api' does not exist` | Old endpoint name in service function | Recreate with `ENDPOINT = 'http-endpoint'` |
+| Tag conflict from ICECHUNK_SEED | IceChunk tags are immutable | Handled by `_create_tag_safe()` — safe to ignore |
+| No files downloaded for run stamp | ASDI lags 6-12 h | Backend auto-falls back up to 6 hours |
+| Only 6 data points visible | Old synthetic data in latest snapshot | Run `ICECHUNK_SEED()` to overwrite |
+| Agent returns 0 chars | Hardcoded model not available | Set `models: orchestration: auto` in `05_create_agent.sql` |
+| Agent tool fails with Cortex permission error | ICECHUNK_DB lacks CORTEX_USER | `GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE ICECHUNK_DB;` |
+| EAI dropped after spec update | ALTER FROM SPECIFICATION resets EAIs | Re-run `ALTER SERVICE SET EXTERNAL_ACCESS_INTEGRATIONS` |
+| UK 3D var not found in repo | 3D var not ingested (large files, opt-in) | Use DataLoader UK tab or `ICECHUNK_SEED_UK_VARS(json)` |
+| Partition rows empty | Missing `knownCols` in partition GET | `fetchPartition()` in `server/index.ts` must pass column metadata |
+| h5py pip install fails | Missing HDF5 libraries | Add `libhdf5-dev pkg-config` to Dockerfile apt install |
 
 ---
 
@@ -224,19 +305,25 @@ Open the ingress URL in a browser and confirm the DeckGL map shows weather hexag
 
 ```
 scripts/
-  00_aws_setup.sh         AWS S3 bucket + IAM user + access keys
-  01_snowflake_setup.sql  Database, compute pool, secrets, EAIs, service functions
-  03_deploy_services.sql  SPCS CREATE SERVICE specs + mandatory EAI application
-  04_load_data.sql        ICECHUNK_SEED() trigger + verification queries
+  00_aws_setup.sh           AWS S3 bucket + IAM user + access keys
+  01_snowflake_setup.sql    DB, pool, secrets, EAIs, all service functions (global + UK)
+  03_deploy_services.sql    SPCS CREATE SERVICE specs + mandatory EAI application
+  04_load_data.sql          ICECHUNK_SEED() global trigger + verification
+  05_create_agent.sql       WEATHER_AGENT + 3 tool procedures + grants
 
 Project root (not in skill):
-  build.sh                Docker buildx wrapper with --bump patch versioning
-  VERSION                 Semver file (e.g. 1.0.5) updated by build.sh
-  Dockerfile              Python FastAPI backend (icechunk-service)
-  icechunk-accelerator/   React/Vite/Express frontend (icechunk-accelerator)
-  app/                    Python FastAPI source (main.py, ingest.py, requirements.txt)
-  service-spec.yaml       Backend SPCS spec (reference copy)
-  icechunk-accelerator/accelerator-service-spec.yaml  Frontend SPCS spec
+  build.sh                  Docker buildx wrapper with --bump patch versioning
+  VERSION                   Semver file (1.0.38) updated by build.sh
+  Dockerfile                Python FastAPI backend (icechunk-service)
+  icechunk-accelerator/     React/Vite/Express frontend (icechunk-accelerator)
+  app/                      Python FastAPI source:
+    main.py                 All endpoints (global + UK slice, level_slice, seed_uk_vars)
+    ingest.py               Global 10km ASDI downloader
+    ingest_uk.py            UK 2km ASDI downloader (surface + 3D height/pressure levels)
+    icechunk_client.py      IceChunk repo open/create helpers
+    requirements.txt        Python deps
+  service-spec.yaml         Backend SPCS spec (reference)
+  icechunk-accelerator/accelerator-service-spec.yaml  Frontend SPCS spec (reference)
 ```
 
 ## Success Criteria
@@ -244,12 +331,18 @@ Project root (not in skill):
 - `ICECHUNK_HEALTH()` returns `{"status": "ok"}`
 - `ICECHUNK_META()` returns `variables` array with 9 entries and `lat_count: 1920`
 - `ICECHUNK_SLICE('air_temperature', 49, 61, -8, 3, NULL)` row count > 1000
-- App ingress URL loads, shows CARTO dark map with weather hexagons
-- `⬡ H3` / `• Points` toggle visible in top-left panel
+- App ingress URL loads with CARTO dark map and weather hexagons
+- `⬡ H3` / `▦ Grid` toggle visible in top-left panel
+- UK dataset toggle loads UK 2km data and zooms to UK
+- `CALL TOOL_WEATHER_META()` returns variables array
+- Asking agent "What's the weather in London?" auto-zooms map and returns values
+- DataLoader UK tab shows variable selector grouped by Surface / Height / Pressure levels
 
 ## Stopping Points
 
 - ✋ Step 0: Copy AWS Secret Access Key before it disappears
-- ✋ Step 1: Fill in actual AWS keys in the SQL before running
-- ✋ Step 1: Compute pool must be IDLE before Step 3
-- ✋ Step 3: Both services must be RUNNING before Step 4
+- ✋ Step 1: Fill in actual AWS keys before running SQL
+- ✋ Step 1: Compute pool must reach IDLE before Step 3
+- ✋ Step 3: Both services must show RUNNING before Step 4
+- ✋ Step 5: Services must be RUNNING before creating the agent
+- ✋ Step 7: 3D pressure-level files are ~70 MB each — allow 5-10 min per variable

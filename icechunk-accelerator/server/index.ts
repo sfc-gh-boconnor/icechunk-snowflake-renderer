@@ -332,14 +332,20 @@ app.get('/api/snapshots', async (_req: Request, res: Response) => {
 // ── UK 2km Seed endpoint ──────────────────────────────────────────────────────
 
 app.post('/api/ingest_uk', async (_req: Request, res: Response) => {
-  // Calls ICECHUNK_SEED_UK() which downloads the latest available hourly
-  // UK 2km run from ASDI, reprojects OSGB36 → WGS84, and writes to IceChunk.
-  console.log(new Date().toISOString(), '[/api/ingest_uk] Calling ICECHUNK_SEED_UK()')
+  // If selectedFiles are provided, calls ICECHUNK_SEED_UK_VARS(json) for selective ingest.
+  // Otherwise calls ICECHUNK_SEED_UK() for default surface-only ingest.
+  const body = _req.body as { selectedFiles?: string[] } | undefined
+  const selectedFiles = body?.selectedFiles
+
+  const [sqlExpr, logTag] = selectedFiles?.length
+    ? [`SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED_UK_VARS('${JSON.stringify(selectedFiles).replace(/'/g, "''")}') AS result`,
+       `ICECHUNK_SEED_UK_VARS (${selectedFiles.length} vars)`]
+    : [`SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED_UK() AS result`,
+       'ICECHUNK_SEED_UK()']
+
+  console.log(new Date().toISOString(), `[/api/ingest_uk] Calling ${logTag}`)
   try {
-    const rows = await runSql(
-      `SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED_UK() AS result`,
-      'ICECHUNK_DB', 'ICECHUNK'
-    ) as Record<string, unknown>[]
+    const rows = await runSql(sqlExpr, 'ICECHUNK_DB', 'ICECHUNK') as Record<string, unknown>[]
     const raw = rows[0]?.RESULT ?? rows[0]?.result ?? {}
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw as Record<string, unknown>
     const runStamp = parsed.run_stamp ?? parsed.tag ?? 'unknown'

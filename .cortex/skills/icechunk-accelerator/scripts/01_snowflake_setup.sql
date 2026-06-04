@@ -208,7 +208,7 @@ CREATE OR REPLACE FUNCTION ICECHUNK_DB.ICECHUNK.ICECHUNK_SLICE_H3(
   ENDPOINT = 'http-endpoint'
   AS '/snowflake/slice_h3';
 
--- 3D cloud-cover at height level
+-- 3D cloud-cover at height level — raw lat/lon points
 CREATE OR REPLACE FUNCTION ICECHUNK_DB.ICECHUNK.ICECHUNK_CLOUD_AT_LEVEL(
   LEVEL_IDX   FLOAT,     -- 0 = surface (~5m), 32 = upper troposphere (~40km)
   LAT_MIN     FLOAT,
@@ -221,6 +221,26 @@ CREATE OR REPLACE FUNCTION ICECHUNK_DB.ICECHUNK.ICECHUNK_CLOUD_AT_LEVEL(
   SERVICE = ICECHUNK_DB.ICECHUNK.ICECHUNK_SERVICE
   ENDPOINT = 'http-endpoint'
   AS '/snowflake/cloud_level';
+
+-- 3D cloud-cover at height level — H3-aggregated (faster, fewer rows)
+-- Returns one row per H3 cell with mean cloud fraction.
+-- Usage:
+--   SELECT f.value:h3index::VARCHAR, f.value:cloud_pct::FLOAT, f.value:height_m::FLOAT
+--   FROM (SELECT ICECHUNK_CLOUD_AT_LEVEL_H3(5, 49, 61, -11, 2, NULL, 5) AS r) t,
+--   LATERAL FLATTEN(input => t.r:data) f;
+CREATE OR REPLACE FUNCTION ICECHUNK_DB.ICECHUNK.ICECHUNK_CLOUD_AT_LEVEL_H3(
+  LEVEL_IDX   FLOAT,     -- 0 = surface (~5m), up to n_levels-1 (~40km)
+  LAT_MIN     FLOAT,
+  LAT_MAX     FLOAT,
+  LON_MIN     FLOAT,
+  LON_MAX     FLOAT,
+  SNAPSHOT_ID VARCHAR,
+  H3_RES      NUMBER     -- H3 resolution 2-6 (5 ≈ 60km cells, 6 ≈ 20km cells)
+)
+  RETURNS VARIANT
+  SERVICE = ICECHUNK_DB.ICECHUNK.ICECHUNK_SERVICE
+  ENDPOINT = 'http-endpoint'
+  AS '/snowflake/cloud_level_h3';
 
 -- ---------------------------------------------------------------------------
 -- 9. GRANTS
@@ -263,6 +283,7 @@ GRANT USAGE ON FUNCTION ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED()                    
 GRANT USAGE ON FUNCTION ICECHUNK_DB.ICECHUNK.ICECHUNK_SLICE(VARCHAR,FLOAT,FLOAT,FLOAT,FLOAT,VARCHAR)                                      TO ROLE ICECHUNK_DB;
 GRANT USAGE ON FUNCTION ICECHUNK_DB.ICECHUNK.ICECHUNK_SLICE_H3(VARCHAR,FLOAT,FLOAT,FLOAT,FLOAT,VARCHAR,NUMBER)                            TO ROLE ICECHUNK_DB;
 GRANT USAGE ON FUNCTION ICECHUNK_DB.ICECHUNK.ICECHUNK_CLOUD_AT_LEVEL(NUMBER,FLOAT,FLOAT,FLOAT,FLOAT,VARCHAR)                              TO ROLE ICECHUNK_DB;
+GRANT USAGE ON FUNCTION ICECHUNK_DB.ICECHUNK.ICECHUNK_CLOUD_AT_LEVEL_H3(FLOAT,FLOAT,FLOAT,FLOAT,FLOAT,VARCHAR,NUMBER)                      TO ROLE ICECHUNK_DB;
 
 -- Cortex AI access — required for the agent and tool procedures to call
 -- AI_COMPLETE / CORTEX.COMPLETE. Without this the Cortex Agent API returns

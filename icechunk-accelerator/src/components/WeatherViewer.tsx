@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ScatterplotLayer, PolygonLayer, SolidPolygonLayer } from '@deck.gl/layers'
+import { PolygonLayer, SolidPolygonLayer } from '@deck.gl/layers'
 import { H3HexagonLayer } from '@deck.gl/geo-layers'
 import { PickingInfo } from '@deck.gl/core'
 import MapView from '../shared/MapView'
@@ -65,13 +65,14 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   const [bbox, setBbox] = useState<BBox>(GLOBAL_BBOX)
   const [heightLevel, setHeightLevel] = useState(0)
   const [heightM, setHeightM] = useState<number | null>(null)
+  const [totalLevels, setTotalLevels] = useState(33)
   const [data, setData] = useState<WeatherPoint[]>([])
   const [meta, setMeta] = useState<MetaResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [opacity, setOpacity] = useState(0.85)
   // 'h3' (default) uses ICECHUNK_SLICE_H3 — Python-aggregated, fewer rows, fastest
-  // 'points' uses ICECHUNK_SLICE — raw grid points rendered as ScatterplotLayer
+  // 'points' uses ICECHUNK_SLICE — raw grid points rendered as SolidPolygonLayer
   const [renderMode, setRenderMode] = useState<'h3' | 'points'>('h3')
   const [minVal, setMinVal] = useState(() => VARIABLE_MAP['air_temperature'].minHint)
   const [maxVal, setMaxVal] = useState(() => VARIABLE_MAP['air_temperature'].maxHint)
@@ -98,16 +99,26 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   // H3 resolution derived from current zoom — Snowflake H3_LATLNG_TO_CELL uses this
   const h3Res = zoomToH3Res(viewState.zoom)
 
-  // Effective variable list — UK dataset has its own fixed set
+  // Effective variable list:
+  // - UK: fixed set (2km dataset has specific vars)
+  // - Global: always use the full VARIABLES list from types.ts so that
+  //   cloud_amount_on_height_levels (3D) is always selectable.
+  //   meta.variables only reflects the *main* branch snapshot, not the
+  //   cloud snapshot the user may have selected.
   const availableVars = dataset === 'uk'
     ? UK_VARIABLES.map(k => resolveVariableMeta(k))
-    : (meta?.variables?.length ? meta.variables.map(k => resolveVariableMeta(k)) : VARIABLES)
+    : VARIABLES.filter(v => v.key !== 'visibility_at_screen_level')
 
   const varMeta = useMemo(() => resolveVariableMeta(activeVar), [activeVar])
 
-  // When meta loads, switch to the first available variable if the current one isn't present
+  // When meta loads, switch to the first available variable only if the active
+  // variable is unknown to both meta AND our static VARIABLES list.
+  // This avoids resetting cloud_amount_on_height_levels (which is not in the
+  // main-branch meta.variables but IS a valid selectable variable).
   useEffect(() => {
-    if (meta?.variables?.length && !meta.variables.includes(activeVar)) {
+    if (meta?.variables?.length
+      && !meta.variables.includes(activeVar)
+      && !VARIABLES.find(v => v.key === activeVar)) {
       setActiveVar(meta.variables[0])
     }
   }, [meta])
@@ -205,7 +216,47 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
       let rows: Record<string, unknown>[]
       const snapExpr = selectedSnapshot ? `'${selectedSnapshot}'` : 'NULL'
 
-      if (dataset === 'uk' && renderMode === 'points') {
+      if (varMeta.is3D && renderMode === 'h3') {
+        // 3D level H3 — generic endpoint handles cloud, temp, wind on height OR pressure levels
+        const levelH3Fn = dataset === 'uk' ? 'ICECHUNK_LEVEL_SLICE_H3_UK' : 'ICECHUNK_CLOUD_AT_LEVEL_H3'
+        const sql3d = dataset === 'uk'
+          ? `SELECT f.value:h3index::VARCHAR AS h3index,
+                    f.value:value::FLOAT     AS value,
+                    f.value:level_value::FLOAT AS level_value,
+                    f.value:level_units::VARCHAR AS level_units,
+                    r.result:total_levels::INTEGER AS total_levels
+             FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.${levelH3Fn}(
+               '${activeVar}', ${heightLevel}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}, ${h3Res}
+             ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`
+          : `SELECT f.value:h3index::VARCHAR    AS h3index,
+                    f.value:value::FLOAT        AS value,
+                    f.value:height_m::FLOAT     AS level_value,
+                    r.result:total_levels::INTEGER AS total_levels
+             FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.${levelH3Fn}(
+               ${heightLevel}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}, ${h3Res}
+             ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`
+        rows = await sfQuery(sql3d, QUERY_DB, QUERY_SCHEMA)
+      } else if (varMeta.is3D) {
+        // 3D level scatter — generic endpoint
+        const levelFn = dataset === 'uk' ? 'ICECHUNK_LEVEL_SLICE_UK' : 'ICECHUNK_CLOUD_AT_LEVEL'
+        const sqlScatter = dataset === 'uk'
+          ? `SELECT f.value:lat::FLOAT AS lat, f.value:lon::FLOAT AS lon,
+                    f.value:value::FLOAT AS value,
+                    f.value:level_value::FLOAT AS level_value,
+                    f.value:level_units::VARCHAR AS level_units,
+                    r.result:total_levels::INTEGER AS total_levels
+             FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.${levelFn}(
+               '${activeVar}', ${heightLevel}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}
+             ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`
+          : `SELECT f.value:lat::FLOAT AS lat, f.value:lon::FLOAT AS lon,
+                    f.value:cloud_pct::FLOAT AS cloud_pct,
+                    f.value:height_m::FLOAT AS level_value,
+                    r.result:total_levels::INTEGER AS total_levels
+             FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.${levelFn}(
+               ${heightLevel}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}
+             ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`
+        rows = await sfQuery(sqlScatter, QUERY_DB, QUERY_SCHEMA)
+      } else if (dataset === 'uk' && renderMode === 'points') {
         // UK 2km — raw grid points (WGS84 lat/lon pre-computed at ingest)
         rows = await sfQuery(
           `SELECT f.value:lat::FLOAT AS lat,
@@ -224,17 +275,6 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
                   f.value:value::FLOAT AS value
            FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_SLICE_H3_UK(
              '${activeVar}', ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}, ${h3Res}
-           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
-          QUERY_DB,
-          QUERY_SCHEMA
-        )
-      } else if (varMeta.is3D) {
-        rows = await sfQuery(
-          `SELECT f.value:lat::FLOAT AS lat, f.value:lon::FLOAT AS lon,
-                  f.value:cloud_pct::FLOAT AS cloud_pct,
-                  f.value:height_m::FLOAT AS height_m
-           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_CLOUD_AT_LEVEL(
-             ${heightLevel}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}
            ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
           QUERY_DB,
           QUERY_SCHEMA
@@ -263,16 +303,27 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
       }
 
       const points: WeatherPoint[] = rows.map(r => {
-        const raw = varMeta.is3D
+        // For 3D H3 cloud: value column is raw fraction (0-1); transform ×100 → pct
+        // For 3D scatter cloud: cloud_pct column is already 0-100; transform ×100 → 0-10000
+        //   (auto-ranging handles the display correctly)
+        // For all 2D variables: value column, apply transform
+        const isH3Cloud = varMeta.is3D && renderMode === 'h3'
+        const isUk3D    = varMeta.is3D && dataset === 'uk'
+        const raw = isH3Cloud
+          ? Number(r.VALUE ?? r.value ?? 0)
+          : varMeta.is3D && !isUk3D
           ? Number(r.CLOUD_PCT ?? r.cloud_pct ?? 0)
           : Number(r.VALUE ?? r.value ?? 0)
+        const lv = r.LEVEL_VALUE ?? r.level_value ?? r.HEIGHT_M ?? r.height_m
+        const lu = r.LEVEL_UNITS ?? r.level_units
         return {
-          lat:       Number(r.LAT ?? r.lat),
-          lon:       Number(r.LON ?? r.lon),
-          h3index:   r.H3INDEX != null ? String(r.H3INDEX) : r.h3index != null ? String(r.h3index) : undefined,
-          value:     varMeta.transform(raw),
-          cloud_pct: r.CLOUD_PCT != null ? Number(r.CLOUD_PCT) : r.cloud_pct != null ? Number(r.cloud_pct) : undefined,
-          height_m:  r.HEIGHT_M  != null ? Number(r.HEIGHT_M)  : r.height_m  != null ? Number(r.height_m)  : undefined,
+          lat:         Number(r.LAT ?? r.lat),
+          lon:         Number(r.LON ?? r.lon),
+          h3index:     r.H3INDEX != null ? String(r.H3INDEX) : r.h3index != null ? String(r.h3index) : undefined,
+          value:       varMeta.transform(raw),
+          cloud_pct:   r.CLOUD_PCT != null ? Number(r.CLOUD_PCT) : r.cloud_pct != null ? Number(r.cloud_pct) : undefined,
+          height_m:    lv != null ? Number(lv) : undefined,
+          level_units: lu != null ? String(lu) : undefined,
         }
       })
 
@@ -286,6 +337,8 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         setMinVal(computedMin)
         setMaxVal(computedMax)
         if (points[0].height_m != null) setHeightM(points[0].height_m)
+        const tl = Number((rows[0] as Record<string, unknown>).TOTAL_LEVELS ?? (rows[0] as Record<string, unknown>).total_levels)
+        if (tl > 0) setTotalLevels(tl)
       }
       setData(points)
     } catch (err) {
@@ -342,13 +395,38 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   const halfDegLat = (dataset === 'uk' ? 0.0097 * ukStride : 0.045) * 1.008
   const halfDegLon = (dataset === 'uk' ? 0.0162 * ukStride : 0.045) * 1.008
 
-  const weatherLayer = varMeta.is3D
-    ? new ScatterplotLayer<WeatherPoint>({
-        id: 'weather-scatter',
+  // Layer selection:
+  // - 3D cloud + H3 mode   → H3HexagonLayer (cloud fraction aggregated to H3 cells)
+  // - 3D cloud + grid mode → SolidPolygonLayer (same grid-cell rectangles as 2D)
+  // - 2D + H3 mode         → H3HexagonLayer (h3index from Python backend)
+  // - 2D + grid mode       → SolidPolygonLayer (degree-based rectangles)
+  const weatherLayer = varMeta.is3D && renderMode === 'h3'
+    ? new H3HexagonLayer<WeatherPoint>({
+        id: 'weather-cloud-h3',
         data,
-        getPosition: d => [d.lon, d.lat],
-        getRadius: 9_000,
-        radiusUnits: 'meters',
+        getHexagon: d => d.h3index ?? '',
+        getFillColor: d => valueToRgba(d.value, minVal, maxVal, varMeta.colorScale),
+        getLineColor: [0, 0, 0, 0],
+        filled: true,
+        extruded: false,
+        pickable: true,
+        onClick: handleLayerClick,
+        opacity,
+        updateTriggers: {
+          getFillColor: [minVal, maxVal, activeVar, heightLevel],
+          getHexagon:   [h3Res],
+        },
+      })
+    : varMeta.is3D
+    ? new SolidPolygonLayer<WeatherPoint>({
+        id: 'weather-cloud-grid',
+        data,
+        getPolygon: d => [
+          [d.lon - halfDegLon, d.lat - halfDegLat],
+          [d.lon + halfDegLon, d.lat - halfDegLat],
+          [d.lon + halfDegLon, d.lat + halfDegLat],
+          [d.lon - halfDegLon, d.lat + halfDegLat],
+        ],
         getFillColor: d => valueToRgba(d.value, minVal, maxVal, varMeta.colorScale),
         getLineColor: [0, 0, 0, 0],
         pickable: true,
@@ -356,6 +434,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         opacity,
         updateTriggers: {
           getFillColor: [minVal, maxVal, activeVar, heightLevel],
+          getPolygon:   [dataset],
         },
       })
     : renderMode === 'points'
@@ -599,24 +678,28 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           />
         </div>
 
-        {/* Height level slider — only for 3D variables */}
+        {/* Height / pressure level slider — only for 3D variables */}
         {varMeta.is3D && (
           <div>
-            <div className="overlay-title" style={{ marginTop: 4 }}>Height Level</div>
+            <div className="overlay-title" style={{ marginTop: 4 }}>
+              {activeVar.endsWith('_on_pressure_levels') ? 'Pressure Level' : 'Height Level'}
+            </div>
             <div className="height-display">
               {heightM != null ? (
                 <>
-                  {heightM < 1000
+                  {activeVar.endsWith('_on_pressure_levels')
+                    ? `${(heightM / 100).toFixed(0)} hPa`
+                    : heightM < 1000
                     ? `${heightM.toFixed(0)}m`
                     : `${(heightM / 1000).toFixed(1)}km`}
-                  <small> level {heightLevel}/32</small>
+                  <small> level {heightLevel}/{totalLevels - 1}</small>
                 </>
               ) : (
-                <>Level {heightLevel}<small>/32</small></>
+                <>Level {heightLevel}<small>/{totalLevels - 1}</small></>
               )}
             </div>
             <input
-              type="range" min={0} max={32} step={1}
+              type="range" min={0} max={totalLevels - 1} step={1}
               value={heightLevel}
               onChange={e => setHeightLevel(Number(e.target.value))}
               style={{ margin: '4px 0' }}
@@ -625,38 +708,44 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
               display: 'flex', justifyContent: 'space-between',
               fontSize: 10, color: 'var(--text-secondary)',
             }}>
-              <span>Surface (~5m)</span>
-              <span>Upper (~40km)</span>
+              {activeVar.endsWith('_on_pressure_levels')
+                ? <><span>Surface (1000 hPa)</span><span>Upper atm (10 hPa)</span></>
+                : <><span>Surface (~5m)</span><span>Upper (~40km)</span></>
+              }
             </div>
           </div>
         )}
 
-        {/* Render mode toggle — available for all 2D datasets */}
-        {!varMeta.is3D && (
-          <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
-            <button
-              className={`btn small ${renderMode === 'h3' ? 'primary' : 'secondary'}`}
-              style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
-              onClick={() => setRenderMode('h3')}
-              title="H3 hexagons — Python aggregation, faster"
-            >
-              ⬡ H3
-            </button>
-            <button
-              className={`btn small ${renderMode === 'points' ? 'primary' : 'secondary'}`}
-              style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
-              onClick={() => setRenderMode('points')}
-              title={`Native grid cells (${dataset === 'uk' ? '~2km squares' : '~10km squares'})`}
-            >
-              ▦ Grid
-            </button>
-          </div>
-        )}
+        {/* Render mode toggle — H3 hexagons vs raw dots/grid */}
+        <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+          <button
+            className={`btn small ${renderMode === 'h3' ? 'primary' : 'secondary'}`}
+            style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
+            onClick={() => setRenderMode('h3')}
+            title="H3 hexagons — Python aggregation, faster"
+          >
+            ⬡ H3
+          </button>
+          <button
+            className={`btn small ${renderMode === 'points' ? 'primary' : 'secondary'}`}
+            style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
+            onClick={() => setRenderMode('points')}
+            title={`Native grid cells (${dataset === 'uk' ? '~2km squares' : '~10km squares'})`}
+          >
+            ▦ Grid
+          </button>
+        </div>
 
         {/* Point count */}
         <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
           {data.length > 0
-            ? `${data.length.toLocaleString()} ${renderMode === 'h3' ? 'H3 cells' : dataset === 'uk' ? '2km grid cells' : '10km grid cells'}`
+            ? `${data.length.toLocaleString()} ${
+                renderMode === 'h3'
+                  ? 'H3 cells'
+                  : varMeta.is3D
+                  ? '10km scatter pts'
+                  : dataset === 'uk' ? '2km grid cells' : '10km grid cells'
+              }`
             : loading ? 'Loading…' : 'No data'}
           {renderMode === 'h3' && data.length > 0 && (
             <span style={{ marginLeft: 6 }}>res {h3Res}</span>

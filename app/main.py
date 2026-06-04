@@ -251,7 +251,8 @@ def health(payload: dict = None):
 
 @app.post("/seed_uk")
 def seed_uk_data(payload: dict = None):
-    """Load Met Office UK 2km data from ASDI S3 and commit to the UK Icechunk repo."""
+    """Load Met Office UK 2km data from ASDI S3 and commit to the UK Icechunk repo.
+    Default: all surface-only variables. Called by ICECHUNK_SEED_UK()."""
     logger.info("ICECHUNK_SEED_UK called — starting UK 2km ingest")
     try:
         from ingest_uk import ingest_uk
@@ -260,6 +261,30 @@ def seed_uk_data(payload: dict = None):
         return {"data": [[0, result]]}
     except Exception as e:
         logger.exception("UK 2km ingest failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/seed_uk_vars")
+def seed_uk_vars(payload: dict = None):
+    """Load selected UK 2km variables from ASDI S3.
+    Payload: {"data": [[0, vars_json]]} where vars_json is a JSON array of zarr_key names.
+    Called by ICECHUNK_SEED_UK_VARS()."""
+    logger.info("ICECHUNK_SEED_UK_VARS called")
+    try:
+        import json
+        from ingest_uk import ingest_uk
+        selected_vars = None
+        if payload and "data" in payload:
+            row = payload["data"][0] if payload["data"] else []
+            vars_json = str(row[1]) if len(row) > 1 and row[1] else None
+            if vars_json:
+                selected_vars = json.loads(vars_json)
+                logger.info(f"  Selected vars: {selected_vars}")
+        result = ingest_uk(selected_vars=selected_vars)
+        logger.info(f"UK ingest complete: {len(result['variables'])} variables")
+        return {"data": [[0, result]]}
+    except Exception as e:
+        logger.exception("UK 2km vars ingest failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -662,4 +687,504 @@ def snowflake_cloud_level(payload: dict):
         raise
     except Exception as e:
         logger.exception("Cloud level slice failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/snowflake/cloud_level_h3")
+def snowflake_cloud_level_h3(payload: dict):
+    """
+    H3-aggregated Snowflake service function for height-level cloud queries.
+    Same as /snowflake/cloud_level but aggregates raw points into H3 cells.
+
+    Input:  {"data": [[0, height_level_idx, lat_min, lat_max, lon_min, lon_max, snapshot_id, h3_res]]}
+    Output: {"data": [[0, {"data": [{"h3index": "...", "value": <fraction>, "cloud_pct": <pct>}...],
+                           "height_m": ..., "total_levels": N, "row_count": N}]]}
+
+    height_level_idx: 0–(n_levels-1), 0 = lowest level ~20m
+    h3_res:           H3 resolution 2–6 (default 5 ≈ 60km)
+    value:            cloud fraction 0–1
+    cloud_pct:        value × 100 (percentage, 0–100)
+    """
+    try:
+        rows_out = []
+        for row in payload.get("data", []):
+            idx         = row[0]
+            level_idx   = int(row[1])
+            lat_min     = float(row[2])
+            lat_max     = float(row[3])
+            lon_min     = float(row[4])
+            lon_max     = float(row[5])
+            snapshot_id = str(row[6]) if len(row) > 6 and row[6] else None
+            h3_res      = int(row[7]) if len(row) > 7 and row[7] is not None else 5
+
+            repo    = open_repo()
+            session = (repo.readonly_session(snapshot_id=snapshot_id)
+                       if snapshot_id else repo.readonly_session("main"))
+            root    = zarr.open_group(session.store, mode="r")
+
+            lat, lon = _get_coords(root)
+            li_start, li_end   = _find_index_range(lat, lat_min, lat_max)
+            loi_start, loi_end = _find_index_range(lon, lon_min, lon_max)
+
+            cloud_arr = root["cloud_amount_on_height_levels"]
+            n_levels  = cloud_arr.shape[0]
+
+            if level_idx < 0 or level_idx >= n_levels:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"height_level_idx must be 0–{n_levels-1}, got {level_idx}"
+                )
+
+            # Read height coordinate value for this level
+            height_m = None
+            if "cloud_height_levels" in root:
+                height_m = float(root["cloud_height_levels"][level_idx])
+
+            # Guard source cell count (pre-aggregation)
+            n_cells = (li_end - li_start) * (loi_end - loi_start)
+            if n_cells > 500_000:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Slice too large ({n_cells} cells). Narrow lat/lon range."
+                )
+
+            arr = cloud_arr[level_idx, li_start:li_end, loi_start:loi_end]
+
+            # Aggregate raw grid points into H3 cells
+            cells: dict[str, list[float]] = defaultdict(list)
+            for li in range(arr.shape[0]):
+                for loi in range(arr.shape[1]):
+                    val = float(arr[li, loi])
+                    if not np.isnan(val):
+                        cell = h3lib.latlng_to_cell(
+                            float(lat[li_start + li]),
+                            float(lon[loi_start + loi]),
+                            h3_res,
+                        )
+                        cells[cell].append(val)
+
+            aggregated = []
+            for cell, vals in cells.items():
+                mean_val = float(np.mean(vals))
+                aggregated.append({
+                    "h3index":   cell,
+                    "value":     round(mean_val, 6),
+                    "cloud_pct": round(mean_val * 100, 2),
+                })
+                if height_m is not None:
+                    aggregated[-1]["height_m"] = height_m
+
+            result = {
+                "data":         aggregated,
+                "snapshot_id":  session.snapshot_id,
+                "variable":     "cloud_amount_on_height_levels",
+                "height_level": level_idx,
+                "height_m":     height_m,
+                "h3_res":       h3_res,
+                "source_rows":  n_cells,
+                "h3_cells":     len(aggregated),
+                "row_count":    len(aggregated),
+                "total_levels": n_levels,
+            }
+            rows_out.append([idx, result])
+        return {"data": rows_out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Cloud level H3 slice failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/snowflake/cloud_level_uk")
+def snowflake_cloud_level_uk(payload: dict):
+    """
+    Snowflake service function for UK 2km height-level cloud queries — raw lat/lon points.
+    UK grid uses 2D curvilinear lat/lon (Lambert Azimuthal Equal Area reprojected to WGS84).
+
+    Input:  {"data": [[0, height_level_idx, lat_min, lat_max, lon_min, lon_max, snapshot_id]]}
+    Output: {"data": [[0, {"data": [{lat, lon, value, cloud_pct, height_m}...],
+                           "height_m": ..., "total_levels": N}]]}
+    """
+    try:
+        rows_out = []
+        for row in payload.get("data", []):
+            idx         = row[0]
+            level_idx   = int(row[1])
+            lat_min     = float(row[2])
+            lat_max     = float(row[3])
+            lon_min     = float(row[4])
+            lon_max     = float(row[5])
+            snapshot_id = str(row[6]) if len(row) > 6 and row[6] else None
+
+            repo    = open_uk_repo()
+            session = (repo.readonly_session(snapshot_id=snapshot_id)
+                       if snapshot_id else repo.readonly_session("main"))
+            root    = zarr.open_group(session.store, mode="r")
+
+            if "cloud_amount_on_height_levels" not in root:
+                raise HTTPException(status_code=400,
+                    detail="cloud_amount_on_height_levels not found in UK repo. Run ICECHUNK_SEED_UK() first.")
+
+            cloud_arr = root["cloud_amount_on_height_levels"]
+            n_levels  = cloud_arr.shape[0]
+
+            if level_idx < 0 or level_idx >= n_levels:
+                raise HTTPException(status_code=400,
+                    detail=f"height_level_idx must be 0–{n_levels-1}, got {level_idx}")
+
+            height_m = None
+            if "cloud_height_levels" in root:
+                height_m = float(root["cloud_height_levels"][level_idx])
+
+            # UK uses 2D curvilinear lat/lon arrays
+            lat2d = np.array(root["latitude"][:])
+            lon2d = np.array(root["longitude"][:])
+            mask  = ((lat2d >= lat_min) & (lat2d <= lat_max) &
+                     (lon2d >= lon_min) & (lon2d <= lon_max))
+
+            n_cells = int(mask.sum())
+            if n_cells > 100_000:
+                raise HTTPException(status_code=400,
+                    detail=f"Slice too large ({n_cells} cells). Narrow lat/lon range.")
+
+            arr = cloud_arr[level_idx]  # (nrows, ncols)
+            rows = []
+            ri_arr, ci_arr = np.where(mask & ~np.isnan(arr))
+            for ri, ci in zip(ri_arr.tolist(), ci_arr.tolist()):
+                val = float(arr[ri, ci])
+                row_dict = {
+                    "lat":       round(float(lat2d[ri, ci]), 6),
+                    "lon":       round(float(lon2d[ri, ci]), 6),
+                    "value":     round(val, 6),
+                    "cloud_pct": round(val * 100, 2),
+                }
+                if height_m is not None:
+                    row_dict["height_m"] = height_m
+                rows.append(row_dict)
+
+            result = {
+                "data":         rows,
+                "snapshot_id":  session.snapshot_id,
+                "variable":     "cloud_amount_on_height_levels",
+                "height_level": level_idx,
+                "height_m":     height_m,
+                "row_count":    len(rows),
+                "total_levels": n_levels,
+            }
+            rows_out.append([idx, result])
+        return {"data": rows_out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("UK cloud level slice failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/snowflake/cloud_level_h3_uk")
+def snowflake_cloud_level_h3_uk(payload: dict):
+    """
+    H3-aggregated UK 2km height-level cloud queries.
+
+    Input:  {"data": [[0, height_level_idx, lat_min, lat_max, lon_min, lon_max, snapshot_id, h3_res]]}
+    Output: {"data": [[0, {"data": [{"h3index": "...", "value": ..., "cloud_pct": ..., "height_m": ...}...],
+                           "height_m": ..., "total_levels": N}]]}
+    """
+    try:
+        rows_out = []
+        for row in payload.get("data", []):
+            idx         = row[0]
+            level_idx   = int(row[1])
+            lat_min     = float(row[2])
+            lat_max     = float(row[3])
+            lon_min     = float(row[4])
+            lon_max     = float(row[5])
+            snapshot_id = str(row[6]) if len(row) > 6 and row[6] else None
+            h3_res      = int(row[7]) if len(row) > 7 and row[7] is not None else 6
+
+            repo    = open_uk_repo()
+            session = (repo.readonly_session(snapshot_id=snapshot_id)
+                       if snapshot_id else repo.readonly_session("main"))
+            root    = zarr.open_group(session.store, mode="r")
+
+            if "cloud_amount_on_height_levels" not in root:
+                raise HTTPException(status_code=400,
+                    detail="cloud_amount_on_height_levels not found in UK repo. Run ICECHUNK_SEED_UK() first.")
+
+            cloud_arr = root["cloud_amount_on_height_levels"]
+            n_levels  = cloud_arr.shape[0]
+
+            if level_idx < 0 or level_idx >= n_levels:
+                raise HTTPException(status_code=400,
+                    detail=f"height_level_idx must be 0–{n_levels-1}, got {level_idx}")
+
+            height_m = None
+            if "cloud_height_levels" in root:
+                height_m = float(root["cloud_height_levels"][level_idx])
+
+            lat2d = np.array(root["latitude"][:])
+            lon2d = np.array(root["longitude"][:])
+            mask  = ((lat2d >= lat_min) & (lat2d <= lat_max) &
+                     (lon2d >= lon_min) & (lon2d <= lon_max))
+
+            n_cells = int(mask.sum())
+            if n_cells > 500_000:
+                raise HTTPException(status_code=400,
+                    detail=f"Slice too large ({n_cells} cells). Narrow lat/lon range.")
+
+            arr = cloud_arr[level_idx]
+            cells: dict[str, list[float]] = defaultdict(list)
+            ri_arr, ci_arr = np.where(mask & ~np.isnan(arr))
+            for ri, ci in zip(ri_arr.tolist(), ci_arr.tolist()):
+                val  = float(arr[ri, ci])
+                cell = h3lib.latlng_to_cell(float(lat2d[ri, ci]), float(lon2d[ri, ci]), h3_res)
+                cells[cell].append(val)
+
+            aggregated = []
+            for cell, vals in cells.items():
+                mean_val = float(np.mean(vals))
+                entry = {
+                    "h3index":   cell,
+                    "value":     round(mean_val, 6),
+                    "cloud_pct": round(mean_val * 100, 2),
+                }
+                if height_m is not None:
+                    entry["height_m"] = height_m
+                aggregated.append(entry)
+
+            result = {
+                "data":         aggregated,
+                "snapshot_id":  session.snapshot_id,
+                "variable":     "cloud_amount_on_height_levels",
+                "height_level": level_idx,
+                "height_m":     height_m,
+                "h3_res":       h3_res,
+                "source_rows":  n_cells,
+                "h3_cells":     len(aggregated),
+                "row_count":    len(aggregated),
+                "total_levels": n_levels,
+            }
+            rows_out.append([idx, result])
+        return {"data": rows_out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("UK cloud level H3 slice failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Generic 3D level slice endpoints (UK) — work for any 3D variable
+# (cloud / temperature / wind on height levels OR pressure levels)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maps zarr variable name → (level_coord_zarr_key, level_units)
+# level_units: "m" for height, "Pa" for pressure
+LEVEL_COORD_MAP: dict[str, tuple[str, str]] = {
+    "cloud_amount_on_height_levels":            ("cloud_height_levels", "m"),
+    "temperature_on_height_levels":             ("height_levels",       "m"),
+    "wind_speed_on_height_levels":              ("height_levels",       "m"),
+    "wind_direction_on_height_levels":          ("height_levels",       "m"),
+    "temperature_on_pressure_levels":           ("pressure_levels",     "Pa"),
+    "relative_humidity_on_pressure_levels":     ("pressure_levels",     "Pa"),
+    "wind_speed_on_pressure_levels":            ("pressure_levels",     "Pa"),
+    "wind_direction_on_pressure_levels":        ("pressure_levels",     "Pa"),
+    "wet_bulb_potential_temperature_on_pressure_levels": ("pressure_levels", "Pa"),
+}
+
+
+def _get_level_meta(root: zarr.Group, variable: str, level_idx: int):
+    """
+    Return (level_value, level_units, n_levels) for a 3D variable.
+    level_value is None if the coordinate array is not stored.
+    """
+    n_levels = root[variable].shape[0]
+    coord_name, units = LEVEL_COORD_MAP.get(variable, ("", ""))
+
+    # Try stored coord from LEVEL_COORD_MAP
+    level_value = None
+    if coord_name and coord_name in root:
+        level_value = float(root[coord_name][level_idx])
+    elif "level_coord" in (root[variable].attrs or {}):
+        # Fallback: read coord name from variable attrs (set at ingest time)
+        coord_name = root[variable].attrs["level_coord"]
+        units      = root[variable].attrs.get("level_units", units)
+        if coord_name in root:
+            level_value = float(root[coord_name][level_idx])
+
+    if not units and "level_units" in (root[variable].attrs or {}):
+        units = root[variable].attrs["level_units"]
+
+    return level_value, units, n_levels
+
+
+@app.post("/snowflake/level_slice_uk")
+def snowflake_level_slice_uk(payload: dict):
+    """
+    Generic 3D level slice for the UK 2km repo — raw lat/lon points.
+    Works for any 3D variable (cloud/temp/wind on height or pressure levels).
+
+    Input:  {"data": [[0, variable, level_idx, lat_min, lat_max, lon_min, lon_max, snapshot_id]]}
+    Output: {"data": [[0, {"data": [{lat, lon, value, level_value, level_units}...],
+                           "total_levels": N, "level_units": "m"|"Pa", ...}]]}
+    """
+    try:
+        rows_out = []
+        for row in payload.get("data", []):
+            idx         = row[0]
+            variable    = str(row[1])
+            level_idx   = int(row[2])
+            lat_min     = float(row[3])
+            lat_max     = float(row[4])
+            lon_min     = float(row[5])
+            lon_max     = float(row[6])
+            snapshot_id = str(row[7]) if len(row) > 7 and row[7] else None
+
+            repo    = open_uk_repo()
+            session = (repo.readonly_session(snapshot_id=snapshot_id)
+                       if snapshot_id else repo.readonly_session("main"))
+            root    = zarr.open_group(session.store, mode="r")
+
+            if variable not in root:
+                raise HTTPException(status_code=400,
+                    detail=f"Variable '{variable}' not found in UK repo.")
+            if root[variable].ndim != 3:
+                raise HTTPException(status_code=400,
+                    detail=f"Variable '{variable}' is not 3D (shape: {root[variable].shape}).")
+
+            level_value, level_units, n_levels = _get_level_meta(root, variable, level_idx)
+
+            if level_idx < 0 or level_idx >= n_levels:
+                raise HTTPException(status_code=400,
+                    detail=f"level_idx must be 0–{n_levels-1}, got {level_idx}")
+
+            lat2d = np.array(root["latitude"][:])
+            lon2d = np.array(root["longitude"][:])
+            mask  = ((lat2d >= lat_min) & (lat2d <= lat_max) &
+                     (lon2d >= lon_min) & (lon2d <= lon_max))
+
+            n_cells = int(mask.sum())
+            if n_cells > 100_000:
+                raise HTTPException(status_code=400,
+                    detail=f"Slice too large ({n_cells} cells). Narrow lat/lon range.")
+
+            arr = root[variable][level_idx]
+            rows = []
+            ri_arr, ci_arr = np.where(mask & ~np.isnan(arr))
+            for ri, ci in zip(ri_arr.tolist(), ci_arr.tolist()):
+                row_dict = {
+                    "lat":   round(float(lat2d[ri, ci]), 6),
+                    "lon":   round(float(lon2d[ri, ci]), 6),
+                    "value": round(float(arr[ri, ci]), 6),
+                }
+                if level_value is not None:
+                    row_dict["level_value"] = level_value
+                    row_dict["level_units"] = level_units
+                rows.append(row_dict)
+
+            result = {
+                "data":         rows,
+                "snapshot_id":  session.snapshot_id,
+                "variable":     variable,
+                "level_idx":    level_idx,
+                "level_value":  level_value,
+                "level_units":  level_units,
+                "total_levels": n_levels,
+                "row_count":    len(rows),
+            }
+            rows_out.append([idx, result])
+        return {"data": rows_out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("UK generic level slice failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/snowflake/level_slice_h3_uk")
+def snowflake_level_slice_h3_uk(payload: dict):
+    """
+    Generic 3D level H3-aggregated slice for the UK 2km repo.
+
+    Input:  {"data": [[0, variable, level_idx, lat_min, lat_max, lon_min, lon_max, snapshot_id, h3_res]]}
+    Output: {"data": [[0, {"data": [{"h3index": "...", "value": ..., "level_value": ...}...],
+                           "total_levels": N, "level_units": "m"|"Pa", ...}]]}
+    """
+    try:
+        rows_out = []
+        for row in payload.get("data", []):
+            idx         = row[0]
+            variable    = str(row[1])
+            level_idx   = int(row[2])
+            lat_min     = float(row[3])
+            lat_max     = float(row[4])
+            lon_min     = float(row[5])
+            lon_max     = float(row[6])
+            snapshot_id = str(row[7]) if len(row) > 7 and row[7] else None
+            h3_res      = int(row[8]) if len(row) > 8 and row[8] is not None else 6
+
+            repo    = open_uk_repo()
+            session = (repo.readonly_session(snapshot_id=snapshot_id)
+                       if snapshot_id else repo.readonly_session("main"))
+            root    = zarr.open_group(session.store, mode="r")
+
+            if variable not in root:
+                raise HTTPException(status_code=400,
+                    detail=f"Variable '{variable}' not found in UK repo.")
+            if root[variable].ndim != 3:
+                raise HTTPException(status_code=400,
+                    detail=f"Variable '{variable}' is not 3D (shape: {root[variable].shape}).")
+
+            level_value, level_units, n_levels = _get_level_meta(root, variable, level_idx)
+
+            if level_idx < 0 or level_idx >= n_levels:
+                raise HTTPException(status_code=400,
+                    detail=f"level_idx must be 0–{n_levels-1}, got {level_idx}")
+
+            lat2d = np.array(root["latitude"][:])
+            lon2d = np.array(root["longitude"][:])
+            mask  = ((lat2d >= lat_min) & (lat2d <= lat_max) &
+                     (lon2d >= lon_min) & (lon2d <= lon_max))
+
+            n_cells = int(mask.sum())
+            if n_cells > 500_000:
+                raise HTTPException(status_code=400,
+                    detail=f"Slice too large ({n_cells} cells). Narrow lat/lon range.")
+
+            arr = root[variable][level_idx]
+            cells: dict[str, list[float]] = defaultdict(list)
+            ri_arr, ci_arr = np.where(mask & ~np.isnan(arr))
+            for ri, ci in zip(ri_arr.tolist(), ci_arr.tolist()):
+                cell = h3lib.latlng_to_cell(float(lat2d[ri, ci]), float(lon2d[ri, ci]), h3_res)
+                cells[cell].append(float(arr[ri, ci]))
+
+            aggregated = []
+            for cell, vals in cells.items():
+                entry = {
+                    "h3index": cell,
+                    "value":   round(float(np.mean(vals)), 6),
+                }
+                if level_value is not None:
+                    entry["level_value"] = level_value
+                    entry["level_units"] = level_units
+                aggregated.append(entry)
+
+            result = {
+                "data":         aggregated,
+                "snapshot_id":  session.snapshot_id,
+                "variable":     variable,
+                "level_idx":    level_idx,
+                "level_value":  level_value,
+                "level_units":  level_units,
+                "h3_res":       h3_res,
+                "source_rows":  n_cells,
+                "h3_cells":     len(aggregated),
+                "total_levels": n_levels,
+                "row_count":    len(aggregated),
+            }
+            rows_out.append([idx, result])
+        return {"data": rows_out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("UK generic level H3 slice failed")
         raise HTTPException(status_code=500, detail=str(e))
