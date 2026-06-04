@@ -329,6 +329,35 @@ app.get('/api/snapshots', async (_req: Request, res: Response) => {
   }
 })
 
+// ── UK 2km Seed endpoint ──────────────────────────────────────────────────────
+
+app.post('/api/ingest_uk', async (_req: Request, res: Response) => {
+  // Calls ICECHUNK_SEED_UK() which downloads the latest available hourly
+  // UK 2km run from ASDI, reprojects OSGB36 → WGS84, and writes to IceChunk.
+  console.log(new Date().toISOString(), '[/api/ingest_uk] Calling ICECHUNK_SEED_UK()')
+  try {
+    const rows = await runSql(
+      `SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED_UK() AS result`,
+      'ICECHUNK_DB', 'ICECHUNK'
+    ) as Record<string, unknown>[]
+    const raw = rows[0]?.RESULT ?? rows[0]?.result ?? {}
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw as Record<string, unknown>
+    const runStamp = parsed.run_stamp ?? parsed.tag ?? 'unknown'
+    res.json({
+      status: 'done',
+      run_stamp: runStamp,
+      snapshot_id: parsed.snapshot_id ?? null,
+      variables: parsed.variables ?? [],
+      grid: parsed.grid ?? null,
+      message: parsed.message ?? `Loaded UK 2km run: ${runStamp}`,
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(new Date().toISOString(), '[/api/ingest_uk]', msg)
+    res.status(500).json({ error: msg })
+  }
+})
+
 // ── Ingest endpoint ───────────────────────────────────────────────────────────
 
 app.post('/api/ingest', async (_req: Request, res: Response) => {

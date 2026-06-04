@@ -6,6 +6,15 @@ import { formatRunStamp } from '../shared/format'
 
 type Status = 'idle' | 'loading' | 'done' | 'error'
 
+type SeedResult = {
+  snapshot_id?: string
+  variables?: string[]
+  grid?: { nrows?: number; ncols?: number; lat_count?: number; lon_count?: number }
+  error?: string
+  tag_conflict?: boolean
+  message?: string
+}
+
 const TIME_SLOTS = ['0000Z', '0600Z', '1200Z', '1800Z']
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -28,15 +37,15 @@ export default function DataLoader() {
     new Set(INGEST_FILES.filter(f => f.sizeMb < 20).map(f => f.filename))
   )
   const [status, setStatus] = useState<Status>('idle')
-  const [result, setResult] = useState<{
-    snapshot_id?: string
-    variables?: string[]
-    error?: string
-    tag_conflict?: boolean
-    message?: string
-  } | null>(null)
+  const [result, setResult] = useState<SeedResult | null>(null)
   const [meta, setMeta] = useState<MetaResult | null>(null)
   const [loadingMeta, setLoadingMeta] = useState(false)
+
+  // UK 2km state
+  const [ukStatus, setUkStatus] = useState<Status>('idle')
+  const [ukResult, setUkResult] = useState<SeedResult | null>(null)
+  const [ukMeta, setUkMeta] = useState<MetaResult | null>(null)
+  const [loadingUkMeta, setLoadingUkMeta] = useState(false)
 
   const runStamp = `${runDate}T${runTime}`
   const totalMb = INGEST_FILES
@@ -71,6 +80,24 @@ export default function DataLoader() {
     setLoadingMeta(false)
   }
 
+  const loadUkRepo = async () => {
+    setLoadingUkMeta(true)
+    try {
+      const rows = await sfQuery(
+        'SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_META_UK() AS result',
+        'ICECHUNK_DB',
+        'ICECHUNK'
+      )
+      if (rows.length > 0) {
+        const raw = rows[0].RESULT ?? rows[0].result
+        setUkMeta(typeof raw === 'string' ? JSON.parse(raw) : raw as MetaResult)
+      }
+    } catch {
+      setUkMeta(null)
+    }
+    setLoadingUkMeta(false)
+  }
+
   const handleLoad = async () => {
     if (selectedFiles.size === 0) return
     setStatus('loading')
@@ -83,6 +110,26 @@ export default function DataLoader() {
       setStatus('done')
       setResult(res)
       await loadRepo() // refresh meta
+    }
+  }
+
+  const handleLoadUk = async () => {
+    setUkStatus('loading')
+    setUkResult(null)
+    try {
+      const resp = await fetch('/api/ingest_uk', { method: 'POST' })
+      const json = await resp.json() as SeedResult & { error?: string }
+      if (!resp.ok || json.error) {
+        setUkStatus('error')
+        setUkResult({ error: json.error ?? 'Unknown error' })
+      } else {
+        setUkStatus('done')
+        setUkResult(json)
+        await loadUkRepo()
+      }
+    } catch (e) {
+      setUkStatus('error')
+      setUkResult({ error: e instanceof Error ? e.message : String(e) })
     }
   }
 
@@ -322,6 +369,152 @@ export default function DataLoader() {
             100% { transform: translateX(200%); width: 60%; }
           }
         `}</style>
+
+        {/* ═══ UK 2km section ══════════════════════════════════════════ */}
+        <div style={{
+          marginTop: 40,
+          paddingTop: 32,
+          borderTop: '1px solid var(--border)',
+        }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>
+            UK Deterministic 2km Data Loader
+          </h2>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 13, lineHeight: 1.6, marginBottom: 16 }}>
+            Download the latest hourly run of the Met Office UK Deterministic 2km model
+            from the ASDI S3 bucket, reproject from OSGB36 (British National Grid) to
+            WGS84, and store as an IceChunk Zarr array in{' '}
+            <code style={{ background: 'var(--surface-2)', padding: '1px 5px', borderRadius: 3, fontSize: 12 }}>
+              s3://icechunk-ro/met_office_uk_2km/
+            </code>.
+          </p>
+
+          {/* UK repo state */}
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <div className="panel-title">UK Repository State</div>
+            {!ukMeta ? (
+              <button className="btn secondary small" onClick={loadUkRepo} disabled={loadingUkMeta}>
+                {loadingUkMeta
+                  ? <><span className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }} /> Loading…</>
+                  : '↺ Load Repo Info'}
+              </button>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div className="grid-3">
+                  <div className="metric-card">
+                    <div className="metric-value" style={{ fontSize: 16 }}>
+                      {ukMeta.variables.length}
+                    </div>
+                    <div className="metric-label">Variables</div>
+                  </div>
+                  <div className="metric-card">
+                    <div className="metric-value" style={{ fontSize: 16 }}>
+                      {ukMeta.grid
+                        ? ((ukMeta.grid.lat_count ?? 0) * (ukMeta.grid.lon_count ?? 0) / 1e6).toFixed(1) + 'M'
+                        : '—'}
+                    </div>
+                    <div className="metric-label">Grid Points</div>
+                  </div>
+                  <div className="metric-card">
+                    <div className="metric-value" style={{ fontSize: 14 }}>
+                      {ukMeta.latest_snapshot?.slice(0, 12) ?? '—'}
+                    </div>
+                    <div className="metric-label">Latest Snapshot</div>
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>Tags</div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {(ukMeta.tags ?? []).map(t => (
+                      <span key={t} className="badge blue" style={{ fontSize: 11 }}>{t}</span>
+                    ))}
+                    {(!ukMeta.tags || ukMeta.tags.length === 0) && (
+                      <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>none</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* UK seed button */}
+          <div className="panel">
+            <div style={{ marginBottom: 10, fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+              Loads the latest available hourly run automatically. Variables included:
+              {' '}air temperature, precipitation rate, 10m wind speed, sea-level pressure,
+              relative humidity, cloud cover, and visibility.
+            </div>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+              <button
+                className="btn primary"
+                onClick={handleLoadUk}
+                disabled={ukStatus === 'loading'}
+                style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+              >
+                {ukStatus === 'loading' ? (
+                  <><Loader size={15} style={{ animation: 'spin 0.7s linear infinite' }} /> Loading…</>
+                ) : (
+                  <><Download size={15} /> Seed UK 2km Data</>
+                )}
+              </button>
+              {ukStatus === 'loading' && (
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                  Downloading from ASDI S3, reprojecting and writing to IceChunk…
+                </span>
+              )}
+            </div>
+
+            {ukStatus === 'loading' && (
+              <div className="progress-bar" style={{ marginBottom: 12 }}>
+                <div
+                  className="progress-fill"
+                  style={{ width: '100%', animation: 'progIndeterminate 1.5s ease-in-out infinite' }}
+                />
+              </div>
+            )}
+
+            {ukStatus === 'done' && ukResult && (
+              <div style={{
+                background: 'rgba(13,176,72,0.1)', border: '1px solid rgba(13,176,72,0.3)',
+                borderRadius: 'var(--radius)', padding: 12,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <CheckCircle size={16} color="var(--green)" />
+                  <span style={{ fontWeight: 600, color: 'var(--green)' }}>UK seed successful</span>
+                </div>
+                {ukResult.snapshot_id && (
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                    Snapshot: <code style={{ color: 'var(--accent)' }}>{ukResult.snapshot_id}</code>
+                  </div>
+                )}
+                {ukResult.message && (
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>
+                    {ukResult.message}
+                  </div>
+                )}
+                {ukResult.variables && ukResult.variables.length > 0 && (
+                  <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {ukResult.variables.map(v => (
+                      <span key={v} className="badge blue" style={{ fontSize: 11 }}>{v}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {ukStatus === 'error' && ukResult?.error && (
+              <div style={{
+                background: 'rgba(229,72,77,0.1)', border: '1px solid rgba(229,72,77,0.3)',
+                borderRadius: 'var(--radius)', padding: 12,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <AlertCircle size={16} color="var(--red)" />
+                  <span style={{ fontWeight: 600, color: 'var(--red)' }}>UK seed failed</span>
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{ukResult.error}</div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   )
