@@ -89,6 +89,9 @@ def _get_coords(root: zarr.Group):
     return lat, lon
 
 
+MAX_RAW_UK_CELLS = 80_000  # target raw point count before auto-striding kicks in
+
+
 def _slice_2d_curvilinear(
     root: zarr.Group,
     variable: str,
@@ -99,6 +102,12 @@ def _slice_2d_curvilinear(
     """
     Slice a variable from a curvilinear (2D coordinate) Zarr group.
     Used for UK 2km data where lat/lon are 2D arrays.
+
+    For raw-point mode (h3_res=None), if the masked cell count exceeds
+    MAX_RAW_UK_CELLS the grid is uniformly subsampled by a computed stride
+    so the response stays within Snowflake's ~10 MB external-function limit.
+    Both backend and frontend use the same formula so SolidPolygonLayer
+    cell sizes are scaled to match the effective resolution.
     """
     lat2d = np.array(root["latitude"][:])
     lon2d = np.array(root["longitude"][:])
@@ -123,19 +132,38 @@ def _slice_2d_curvilinear(
     while arr.ndim > 2:
         arr = arr[0]
 
-    arr_masked = np.where(mask, arr, np.nan)
-    rows_idx, cols_idx = np.where(mask & ~np.isnan(arr))
-
     if h3_res is None:
+        # Auto-stride: subsample the 2D grid uniformly so we stay under the
+        # Snowflake external-function response size limit (~10 MB).
+        # stride = ceil(sqrt(n_cells / target)) keeps output ≤ target cells.
+        stride = 1
+        if n_cells > MAX_RAW_UK_CELLS:
+            stride = max(1, int(np.ceil(np.sqrt(n_cells / MAX_RAW_UK_CELLS))))
+
+        if stride > 1:
+            lat_use  = lat2d[::stride, ::stride]
+            lon_use  = lon2d[::stride, ::stride]
+            arr_use  = arr[::stride, ::stride]
+            mask_use = mask[::stride, ::stride]
+        else:
+            lat_use, lon_use, arr_use, mask_use = lat2d, lon2d, arr, mask
+
+        rows_idx, cols_idx = np.where(mask_use & ~np.isnan(arr_use))
         source_rows = [
-            {"lat": round(float(lat2d[ri, ci]), 6),
-             "lon": round(float(lon2d[ri, ci]), 6),
+            {"lat": round(float(lat_use[ri, ci]), 6),
+             "lon": round(float(lon_use[ri, ci]), 6),
              "variable": variable,
-             "value": round(float(arr[ri, ci]), 6)}
+             "value": round(float(arr_use[ri, ci]), 6)}
             for ri, ci in zip(rows_idx.tolist(), cols_idx.tolist())
         ]
-        return {"data": source_rows, "row_count": len(source_rows), "variable": variable}
+        return {
+            "data":      source_rows,
+            "row_count": len(source_rows),
+            "variable":  variable,
+            "stride":    stride,
+        }
     else:
+        rows_idx, cols_idx = np.where(mask & ~np.isnan(arr))
         cells: dict[str, list[float]] = defaultdict(list)
         for ri, ci in zip(rows_idx.tolist(), cols_idx.tolist()):
             cell = h3lib.latlng_to_cell(float(lat2d[ri, ci]), float(lon2d[ri, ci]), h3_res)

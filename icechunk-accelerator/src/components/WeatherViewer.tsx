@@ -30,6 +30,9 @@ import {
 const QUERY_DB = 'ICECHUNK_DB'
 const QUERY_SCHEMA = 'ICECHUNK'
 const MAX_CELLS = 500_000
+// TARGET_UK_RAW: backend auto-strides UK raw queries to stay under this count
+// (keeps Snowflake external function responses within ~10MB).
+const TARGET_UK_RAW = 80_000
 
 /**
  * Map DeckGL zoom level to an H3 resolution that produces hex cells
@@ -175,9 +178,25 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   const fetchData = useCallback(async () => {
     if (!varMeta) return
     if (!meta) return
-    const cellCount = estimateCellCount(bbox.latMin, bbox.latMax, bbox.lonMin, bbox.lonMax)
-    if (cellCount > MAX_CELLS) {
-      setError(`Selection too large (~${cellCount.toLocaleString()} cells). Narrow your bounding box.`)
+    // For UK grid mode use the actual ~2km spacing to estimate cell count;
+    // the global estimator uses 10km spacing and underestimates by ~25x.
+    const ukGrid = dataset === 'uk' && renderMode === 'points'
+    const cellCount = ukGrid
+      ? Math.ceil((bbox.latMax - bbox.latMin) / 0.019) *
+        Math.ceil((bbox.lonMax - bbox.lonMin) / 0.032)
+      : estimateCellCount(bbox.latMin, bbox.latMax, bbox.lonMin, bbox.lonMax)
+    // Backend auto-strides large UK requests, so check effective post-stride count.
+    const stride = ukGrid && cellCount > TARGET_UK_RAW
+      ? Math.max(1, Math.ceil(Math.sqrt(cellCount / TARGET_UK_RAW)))
+      : 1
+    const effectiveCells = ukGrid ? Math.ceil(cellCount / (stride * stride)) : cellCount
+    const limit = ukGrid ? TARGET_UK_RAW * 2 : MAX_CELLS
+    if (effectiveCells > limit) {
+      setError(
+        ukGrid
+          ? `UK grid area too large (~${effectiveCells.toLocaleString()} effective cells). Zoom in or use H3 mode.`
+          : `Selection too large (~${cellCount.toLocaleString()} cells). Narrow your bounding box.`
+      )
       return
     }
     setError(null)
@@ -306,8 +325,22 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   //
   // Global 10km: ~0.09° spacing → half-extents 0.045° × 0.045°
   // UK 2km:  lat range 18.85° / 970 rows ≈ 0.019°, lon range 33.73° / 1042 cols ≈ 0.032°
-  const halfDegLat = dataset === 'uk' ? 0.0097 : 0.045
-  const halfDegLon = dataset === 'uk' ? 0.0162 : 0.045
+  //
+  // Auto-stride: backend subsamples the UK grid by stride = ceil(sqrt(n/TARGET_UK_RAW))
+  // when the bbox would return more than TARGET_UK_RAW raw cells. We compute the same
+  // stride here so the SolidPolygonLayer cells are scaled to fill the gaps.
+  const ukEstimate = dataset === 'uk' && renderMode === 'points'
+    ? Math.ceil((bbox.latMax - bbox.latMin) / 0.019) *
+      Math.ceil((bbox.lonMax - bbox.lonMin) / 0.032)
+    : 0
+  const ukStride = ukEstimate > TARGET_UK_RAW
+    ? Math.max(1, Math.ceil(Math.sqrt(ukEstimate / TARGET_UK_RAW)))
+    : 1
+
+  // Multiply by 1.008 to add ~0.8% overlap so the dark basemap doesn't bleed
+  // through the hairline gaps between adjacent cells.
+  const halfDegLat = (dataset === 'uk' ? 0.0097 * ukStride : 0.045) * 1.008
+  const halfDegLon = (dataset === 'uk' ? 0.0162 * ukStride : 0.045) * 1.008
 
   const weatherLayer = varMeta.is3D
     ? new ScatterplotLayer<WeatherPoint>({
@@ -438,7 +471,17 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     onFocusConsumed?.()
   }, [focusBbox])
 
-  const cellCount = estimateCellCount(bbox.latMin, bbox.latMax, bbox.lonMin, bbox.lonMax)
+  const isUkGrid = dataset === 'uk' && renderMode === 'points'
+  const ukRawEstimate = isUkGrid
+    ? Math.ceil((bbox.latMax - bbox.latMin) / 0.019) *
+      Math.ceil((bbox.lonMax - bbox.lonMin) / 0.032)
+    : 0
+  const displayStride = ukRawEstimate > TARGET_UK_RAW
+    ? Math.max(1, Math.ceil(Math.sqrt(ukRawEstimate / TARGET_UK_RAW)))
+    : 1
+  const cellCount = isUkGrid
+    ? Math.ceil(ukRawEstimate / (displayStride * displayStride))
+    : estimateCellCount(bbox.latMin, bbox.latMax, bbox.lonMin, bbox.lonMax)
 
   // ── Save to Snowflake table ───────────────────────────────────────────────
   const variableKeys = meta?.variables?.length ? meta.variables : VARIABLES.map(v => v.key)
