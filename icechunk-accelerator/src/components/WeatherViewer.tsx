@@ -1,0 +1,785 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ScatterplotLayer, PolygonLayer } from '@deck.gl/layers'
+import { H3HexagonLayer } from '@deck.gl/geo-layers'
+import { PickingInfo } from '@deck.gl/core'
+import MapView from '../shared/MapView'
+import { sfQuery } from '../shared/helpers'
+import {
+  valueToRgba,
+  formatValue,
+  buildGradient,
+  estimateCellCount,
+} from '../shared/format'
+import {
+  VARIABLES,
+  VARIABLE_MAP,
+  resolveVariableMeta,
+  WeatherPoint,
+  MetaResult,
+  BBox,
+  BBOX_PRESETS,
+  GLOBAL_BBOX,
+} from '../types'
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+const QUERY_DB = 'ICECHUNK_DB'
+const QUERY_SCHEMA = 'ICECHUNK'
+const MAX_CELLS = 500_000
+
+/**
+ * Map DeckGL zoom level to an H3 resolution that produces hex cells
+ * roughly matching the on-screen grid spacing.
+ *
+ * H3 res 2 → ~1500km | res 3 → ~500km | res 4 → ~180km
+ * res 5 → ~60km      | res 6 → ~20km  (best match for 10km Met Office grid)
+ */
+function zoomToH3Res(zoom: number): number {
+  if (zoom <= 2) return 2
+  if (zoom <= 4) return 3
+  if (zoom <= 6) return 4
+  if (zoom <= 8) return 5
+  return 6
+}
+
+interface WeatherViewerProps {
+  /** Called when the user clicks a point or requests to ask the agent about the current region. */
+  onMapContext?: (message: string) => void
+  /** Bbox from agent tool results — zooms and loads data for that region. */
+  focusBbox?: { lat_min: number; lat_max: number; lon_min: number; lon_max: number } | null
+  /** Called after focusBbox has been consumed so App can clear it. */
+  onFocusConsumed?: () => void
+}
+
+export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed }: WeatherViewerProps) {
+  const [activeVar, setActiveVar] = useState('air_temperature')
+  const [bbox, setBbox] = useState<BBox>(GLOBAL_BBOX)
+  const [heightLevel, setHeightLevel] = useState(0)
+  const [heightM, setHeightM] = useState<number | null>(null)
+  const [data, setData] = useState<WeatherPoint[]>([])
+  const [meta, setMeta] = useState<MetaResult | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [opacity, setOpacity] = useState(0.85)
+  // 'h3' (default) uses ICECHUNK_SLICE_H3 — Python-aggregated, fewer rows, fastest
+  // 'points' uses ICECHUNK_SLICE — raw grid points rendered as ScatterplotLayer
+  const [renderMode, setRenderMode] = useState<'h3' | 'points'>('h3')
+  const [minVal, setMinVal] = useState(() => VARIABLE_MAP['air_temperature'].minHint)
+  const [maxVal, setMaxVal] = useState(() => VARIABLE_MAP['air_temperature'].maxHint)
+  const [snapshots, setSnapshots] = useState<Array<{ tag: string; label: string; snapshotId: string }>>([])  
+  const [selectedSnapshot, setSelectedSnapshot] = useState<string | null>(null)
+
+  // ── Save-to-table state ────────────────────────────────────────────────────
+  const [tableName, setTableName] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveResult, setSaveResult] = useState<{ table: string; row_count: number } | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [pivoted, setPivoted] = useState(false)   // false = long format, true = wide/pivoted
+  const tableInputRef = useRef<HTMLInputElement>(null)
+
+  const [viewState, setViewState] = useState({
+    longitude: 0,
+    latitude: 20,
+    zoom: 1.5,
+    pitch: 0 as number,
+    bearing: 0 as number,
+  })
+
+  // H3 resolution derived from current zoom — Snowflake H3_LATLNG_TO_CELL uses this
+  const h3Res = zoomToH3Res(viewState.zoom)
+
+  // Effective variable list — from snapshot metadata if available, else hardcoded
+  const availableVars = meta?.variables?.length
+    ? meta.variables.map(k => resolveVariableMeta(k))
+    : VARIABLES
+
+  const varMeta = useMemo(() => resolveVariableMeta(activeVar), [activeVar])
+
+  // When meta loads, switch to the first available variable if the current one isn't present
+  useEffect(() => {
+    if (meta?.variables?.length && !meta.variables.includes(activeVar)) {
+      setActiveVar(meta.variables[0])
+    }
+  }, [meta])
+
+  // Reset color range to hints when variable changes
+  useEffect(() => {
+    setMinVal(varMeta.minHint)
+    setMaxVal(varMeta.maxHint)
+  }, [activeVar, varMeta.minHint, varMeta.maxHint])
+
+  // Auto-generate table name when bbox or snapshot changes
+  // e.g. WEATHER_20260603_143022
+  useEffect(() => {
+    const now = new Date()
+    const stamp = now.getFullYear().toString()
+      + String(now.getMonth() + 1).padStart(2, '0')
+      + String(now.getDate()).padStart(2, '0')
+      + '_'
+      + String(now.getHours()).padStart(2, '0')
+      + String(now.getMinutes()).padStart(2, '0')
+      + String(now.getSeconds()).padStart(2, '0')
+    setTableName(`WEATHER_${stamp}`)
+    setSaveResult(null)
+    setSaveError(null)
+  }, [bbox, selectedSnapshot])
+
+  // ── Load repo metadata and available snapshots on mount ─────────────────────
+  useEffect(() => {
+    const loadMeta = async () => {
+      const rows = await sfQuery(
+        `SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_META() AS result`,
+        QUERY_DB,
+        QUERY_SCHEMA
+      )
+      if (rows.length > 0) {
+        const raw = rows[0].RESULT ?? rows[0].result
+        setMeta(typeof raw === 'string' ? JSON.parse(raw) : raw as MetaResult)
+      }
+    }
+    const loadSnapshots = async () => {
+      try {
+        const res = await fetch('/api/snapshots')
+        if (res.ok) {
+          const body = await res.json() as { snapshots: Array<{ tag: string; label: string; snapshotId: string }> }
+          setSnapshots(body.snapshots ?? [])
+        }
+      } catch { /* non-critical */ }
+    }
+    loadMeta()
+    loadSnapshots()
+  }, [])
+
+  // ── Fetch weather data ───────────────────────────────────────────────────────
+  // h3Res is included so a zoom-level change that crosses a resolution
+  // boundary will trigger a re-fetch with the correct H3 resolution baked
+  // into the Snowflake query.
+  const fetchData = useCallback(async () => {
+    if (!varMeta) return
+    if (!meta) return
+    const cellCount = estimateCellCount(bbox.latMin, bbox.latMax, bbox.lonMin, bbox.lonMax)
+    if (cellCount > MAX_CELLS) {
+      setError(`Selection too large (~${cellCount.toLocaleString()} cells). Narrow your bounding box.`)
+      return
+    }
+    setError(null)
+    setLoading(true)
+    try {
+      let rows: Record<string, unknown>[]
+
+      if (varMeta.is3D) {
+        // 3D cloud — always ScatterplotLayer, no H3
+        rows = await sfQuery(
+          `SELECT f.value:lat::FLOAT AS lat, f.value:lon::FLOAT AS lon,
+                  f.value:cloud_pct::FLOAT AS cloud_pct,
+                  f.value:height_m::FLOAT AS height_m
+           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_CLOUD_AT_LEVEL(
+             ${heightLevel}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${selectedSnapshot ? `'${selectedSnapshot}'` : 'NULL'}
+           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
+          QUERY_DB,
+          QUERY_SCHEMA
+        )
+      } else if (renderMode === 'h3') {
+        // H3 mode — ICECHUNK_SLICE_H3 aggregates in Python.
+        // Python returns one row per H3 cell (pre-aggregated mean), so:
+        //  - No per-row H3_LATLNG_TO_CELL in Snowflake SQL
+        //  - Far fewer rows returned (e.g. 9,984 source pts → ~2,000 cells at res 5)
+        rows = await sfQuery(
+          `SELECT f.value:h3index::VARCHAR AS h3index,
+                  f.value:value::FLOAT AS value
+           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_SLICE_H3(
+             '${activeVar}', ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${selectedSnapshot ? `'${selectedSnapshot}'` : 'NULL'}, ${h3Res}
+           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
+          QUERY_DB,
+          QUERY_SCHEMA
+        )
+      } else {
+        // Points mode — raw grid points via ICECHUNK_SLICE, rendered as ScatterplotLayer
+        rows = await sfQuery(
+          `SELECT f.value:lat::FLOAT AS lat,
+                  f.value:lon::FLOAT AS lon,
+                  f.value:value::FLOAT AS value
+           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_SLICE(
+             '${activeVar}', ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${selectedSnapshot ? `'${selectedSnapshot}'` : 'NULL'}
+           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
+          QUERY_DB,
+          QUERY_SCHEMA
+        )
+      }
+
+      const points: WeatherPoint[] = rows.map(r => {
+        const raw = varMeta.is3D
+          ? Number(r.CLOUD_PCT ?? r.cloud_pct ?? 0)
+          : Number(r.VALUE ?? r.value ?? 0)
+        return {
+          lat:       Number(r.LAT ?? r.lat),
+          lon:       Number(r.LON ?? r.lon),
+          h3index:   r.H3INDEX != null ? String(r.H3INDEX) : r.h3index != null ? String(r.h3index) : undefined,
+          value:     varMeta.transform(raw),
+          cloud_pct: r.CLOUD_PCT != null ? Number(r.CLOUD_PCT) : r.cloud_pct != null ? Number(r.cloud_pct) : undefined,
+          height_m:  r.HEIGHT_M  != null ? Number(r.HEIGHT_M)  : r.height_m  != null ? Number(r.height_m)  : undefined,
+        }
+      })
+
+      if (points.length > 0) {
+        let computedMin = points[0].value
+        let computedMax = points[0].value
+        for (const p of points) {
+          if (p.value < computedMin) computedMin = p.value
+          if (p.value > computedMax) computedMax = p.value
+        }
+        setMinVal(computedMin)
+        setMaxVal(computedMax)
+        if (points[0].height_m != null) setHeightM(points[0].height_m)
+      }
+      setData(points)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [activeVar, bbox, heightLevel, varMeta, selectedSnapshot, meta, h3Res, renderMode])
+
+  useEffect(() => { fetchData() }, [fetchData])
+
+  // ── Build deck.gl layers ───────────────────────────────────────────────────
+  const bboxPolygon = [
+    [bbox.lonMin, bbox.latMin],
+    [bbox.lonMax, bbox.latMin],
+    [bbox.lonMax, bbox.latMax],
+    [bbox.lonMin, bbox.latMax],
+    [bbox.lonMin, bbox.latMin],
+  ]
+
+  // When a layer item is clicked, build a context message for the agent
+  const handleLayerClick = useCallback((info: PickingInfo) => {
+    if (!info.object || !onMapContext) return
+    const d = info.object as WeatherPoint
+    if (!d.lat && d.lat !== 0) return
+    const displayVal = formatValue(d.value, activeVar)
+    const msg = `Tell me about the weather at lat ${d.lat.toFixed(4)}, lon ${d.lon.toFixed(4)}.\n` +
+                `${varMeta.label}: ${displayVal}\n` +
+                `What does this value mean and how does it compare to the surrounding area?`
+    onMapContext(msg)
+  }, [activeVar, varMeta, onMapContext])
+
+  // Layer depends on both varMeta.is3D and renderMode:
+  // - 3D cloud → always ScatterplotLayer
+  // - 2D + H3 mode → H3HexagonLayer (h3index comes from Python backend)
+  // - 2D + points mode → ScatterplotLayer (raw lat/lon grid points)
+  const weatherLayer = varMeta.is3D || renderMode === 'points'
+    ? new ScatterplotLayer<WeatherPoint>({
+        id: 'weather-scatter',
+        data,
+        getPosition: d => [d.lon, d.lat],
+        getRadius: 9_000,
+        radiusUnits: 'meters',
+        getFillColor: d => valueToRgba(d.value, minVal, maxVal, varMeta.colorScale),
+        getLineColor: [0, 0, 0, 0],
+        pickable: true,
+        onClick: handleLayerClick,
+        opacity,
+        updateTriggers: {
+          getFillColor: [minVal, maxVal, activeVar, heightLevel],
+        },
+      })
+    : new H3HexagonLayer<WeatherPoint>({
+        id: 'weather-h3',
+        data,
+        // h3index is pre-computed by the Python backend in ICECHUNK_SLICE_H3
+        // — no client-side h3-js needed, no SQL H3 functions per row
+        getHexagon: d => d.h3index ?? '',
+        getFillColor: d => valueToRgba(d.value, minVal, maxVal, varMeta.colorScale),
+        getLineColor: [0, 0, 0, 0],
+        filled: true,
+        extruded: false,
+        pickable: true,
+        onClick: handleLayerClick,
+        opacity,
+        updateTriggers: {
+          getFillColor: [minVal, maxVal, activeVar, heightLevel],
+          getHexagon:   [h3Res],
+        },
+      })
+
+  const bboxLayer = new PolygonLayer({
+    id: 'bbox-outline',
+    data: [{ polygon: bboxPolygon }],
+    getPolygon: (d: { polygon: number[][] }) => d.polygon,
+    getFillColor: [41, 181, 232, 20],
+    getLineColor: [41, 181, 232, 180],
+    getLineWidth: 2,
+    lineWidthUnits: 'pixels',
+    pickable: false,
+  })
+
+  // ── Tooltip handler ────────────────────────────────────────────────────────
+  const getTooltip = useCallback((info: PickingInfo) => {
+    if (!info.object) return null
+    const d = info.object as WeatherPoint
+    return {
+      html: `
+        <div style="font-weight:600">${varMeta.label}</div>
+        <div>${formatValue(d.value, activeVar)}</div>
+        ${d.height_m != null ? `<div style="color:#8A9BB0;font-size:11px">Height: ${d.height_m}m</div>` : ''}
+        <div style="color:#8A9BB0;font-size:11px">${d.lat.toFixed(4)}°, ${d.lon.toFixed(4)}°</div>
+        ${d.h3index ? `<div style="color:#8A9BB0;font-size:10px">H3 res ${h3Res}</div>` : ''}
+        ${renderMode === 'points' && d.lat ? `<div style="color:#8A9BB0;font-size:10px">${d.lat.toFixed(3)}°, ${d.lon.toFixed(3)}°</div>` : ''}
+        ${onMapContext ? `<div style="color:#29B5E8;font-size:10px;margin-top:3px">Click to ask agent ✦</div>` : ''}
+      `,
+      className: 'deck-tooltip',
+    }
+  }, [activeVar, varMeta, h3Res, renderMode, onMapContext])
+
+  // ── Viewport → bbox helper ─────────────────────────────────────────────────
+  const useViewportAsBbox = () => {
+    const zoom = viewState.zoom
+    const latSpan = 360 / Math.pow(2, zoom) * 0.5
+    const lonSpan = 360 / Math.pow(2, zoom)
+    setBbox({
+      latMin: Math.max(-89, viewState.latitude - latSpan),
+      latMax: Math.min(89, viewState.latitude + latSpan),
+      lonMin: Math.max(-179, viewState.longitude - lonSpan),
+      lonMax: Math.min(179, viewState.longitude + lonSpan),
+    })
+  }
+
+  // Fly the map to a bounding box preset
+  const setBboxPreset = (preset: BBox) => {
+    setBbox(preset)
+    const centerLat = (preset.latMin + preset.latMax) / 2
+    const centerLon = (preset.lonMin + preset.lonMax) / 2
+    // Compute zoom so the bbox fits comfortably in the viewport.
+    // log2(360 / span) gives the zoom where span fills ~360° of screen;
+    // subtract 0.8 to leave a small margin around the region.
+    const latSpan = preset.latMax - preset.latMin
+    const lonSpan = preset.lonMax - preset.lonMin
+    const zoom = Math.max(1, Math.log2(360 / Math.max(latSpan, lonSpan)) - 0.8)
+    setViewState(vs => ({ ...vs, longitude: centerLon, latitude: centerLat, zoom }))
+  }
+
+  // Groups for the preset dropdown
+  const presetGroups = Array.from(new Set(BBOX_PRESETS.map(p => p.group)))
+
+  // When the agent emits a map_focus event, zoom the map to that region
+  useEffect(() => {
+    if (!focusBbox) return
+    setBboxPreset({
+      latMin: focusBbox.lat_min,
+      latMax: focusBbox.lat_max,
+      lonMin: focusBbox.lon_min,
+      lonMax: focusBbox.lon_max,
+    })
+    onFocusConsumed?.()
+  }, [focusBbox])
+
+  const cellCount = estimateCellCount(bbox.latMin, bbox.latMax, bbox.lonMin, bbox.lonMax)
+
+  // ── Save to Snowflake table ───────────────────────────────────────────────
+  const variableKeys = meta?.variables?.length ? meta.variables : VARIABLES.map(v => v.key)
+
+  const handleSaveTable = async () => {
+    if (!tableName.trim()) return
+    setSaving(true)
+    setSaveResult(null)
+    setSaveError(null)
+    try {
+      const res = await fetch('/api/save-table', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          table_name: tableName.trim(),
+          lat_min:     bbox.latMin,
+          lat_max:     bbox.latMax,
+          lon_min:     bbox.lonMin,
+          lon_max:     bbox.lonMax,
+          snapshot_id: selectedSnapshot ?? null,
+          variables:   variableKeys.filter(v => !v.startsWith('cloud_amount_on_height')),
+          pivoted,
+        }),
+      })
+      const body = await res.json() as { table?: string; row_count?: number; error?: string }
+      if (!res.ok) { setSaveError(body.error ?? 'Unknown error'); return }
+      setSaveResult({ table: body.table!, row_count: body.row_count ?? 0 })
+    } catch (err) {
+      setSaveError(String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleCopyTable = () => {
+    if (!saveResult) return
+    navigator.clipboard.writeText(saveResult.table).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+  return (
+    <div className="map-outer">
+      <MapView
+        layers={[weatherLayer, bboxLayer]}
+        initialViewState={viewState}
+        getTooltip={getTooltip}
+        onViewStateChange={({ viewState: vs }) => {
+          setViewState(vs as typeof viewState)
+        }}
+      />
+
+      {/* Loading overlay */}
+      {loading && (
+        <div className="map-loading">
+          <div className="spinner" />
+        </div>
+      )}
+
+      {/* Error banner */}
+      {error && (
+        <div className="map-overlay top-right" style={{ maxWidth: 280 }}>
+          <div style={{ color: 'var(--red)', fontSize: 12 }}>⚠ {error}</div>
+        </div>
+      )}
+      <div className="map-overlay top-left">
+        <div className="overlay-title">Variable</div>
+
+        <div className="form-group" style={{ marginBottom: 12 }}>
+          <select
+            className="form-select"
+            value={activeVar}
+            onChange={e => setActiveVar(e.target.value)}
+          >
+            {availableVars.map(v => (
+              <option key={v.key} value={v.key}>
+                {v.label}{v.is3D ? ' (3D)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="form-group" style={{ marginBottom: varMeta.is3D ? 12 : 0 }}>
+          <label className="form-label">Opacity: {Math.round(opacity * 100)}%</label>
+          <input
+            type="range" min={0.1} max={1} step={0.05}
+            value={opacity}
+            onChange={e => setOpacity(Number(e.target.value))}
+          />
+        </div>
+
+        {/* Height level slider — only for 3D variables */}
+        {varMeta.is3D && (
+          <div>
+            <div className="overlay-title" style={{ marginTop: 4 }}>Height Level</div>
+            <div className="height-display">
+              {heightM != null ? (
+                <>
+                  {heightM < 1000
+                    ? `${heightM.toFixed(0)}m`
+                    : `${(heightM / 1000).toFixed(1)}km`}
+                  <small> level {heightLevel}/32</small>
+                </>
+              ) : (
+                <>Level {heightLevel}<small>/32</small></>
+              )}
+            </div>
+            <input
+              type="range" min={0} max={32} step={1}
+              value={heightLevel}
+              onChange={e => setHeightLevel(Number(e.target.value))}
+              style={{ margin: '4px 0' }}
+            />
+            <div style={{
+              display: 'flex', justifyContent: 'space-between',
+              fontSize: 10, color: 'var(--text-secondary)',
+            }}>
+              <span>Surface (~5m)</span>
+              <span>Upper (~40km)</span>
+            </div>
+          </div>
+        )}
+
+        {/* Render mode toggle — always visible for 2D variables */}
+        {!varMeta.is3D && (
+          <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+            <button
+              className={`btn small ${renderMode === 'h3' ? 'primary' : 'secondary'}`}
+              style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
+              onClick={() => setRenderMode('h3')}
+              title="H3 hexagons — Python aggregation, faster"
+            >
+              ⬡ H3
+            </button>
+            <button
+              className={`btn small ${renderMode === 'points' ? 'primary' : 'secondary'}`}
+              style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
+              onClick={() => setRenderMode('points')}
+              title="Raw grid points — exact positions"
+            >
+              • Points
+            </button>
+          </div>
+        )}
+
+        {/* Point count */}
+        <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
+          {data.length > 0
+            ? `${data.length.toLocaleString()} ${renderMode === 'h3' ? 'H3 cells' : 'points'}`
+            : loading ? 'Loading…' : 'No data'}
+          {renderMode === 'h3' && data.length > 0 && (
+            <span style={{ marginLeft: 6 }}>res {h3Res}</span>
+          )}
+        </div>
+      </div>
+
+      {/* ── Snapshot / date selector ──────────────────────── */}
+      {meta && (
+        <div className="map-overlay top-right" style={{ padding: '8px 12px', minWidth: 220 }}>
+          <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 6 }}>
+            Snapshot
+          </div>
+
+          {snapshots.length > 0 ? (
+            <>
+              <select
+                className="form-select"
+                style={{ fontSize: 12, padding: '4px 8px' }}
+                value={selectedSnapshot ?? ''}
+                onChange={e => setSelectedSnapshot(e.target.value || null)}
+              >
+                <option value="">Latest</option>
+                {snapshots.map(s => (
+                  <option key={s.tag} value={s.snapshotId}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+              <div style={{ marginTop: 4, fontSize: 10, color: 'var(--text-secondary)' }}>
+                {selectedSnapshot
+                  ? snapshots.find(s => s.snapshotId === selectedSnapshot)?.tag ?? selectedSnapshot.slice(0, 16)
+                  : meta.latest_snapshot.slice(0, 16)}
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="snapshot-badge">
+                {meta.latest_snapshot.slice(0, 16)}
+              </div>
+              {meta.tags.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  {meta.tags.map(t => (
+                    <span key={t} className="badge blue" style={{ fontSize: 10 }}>
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Bounding box controls ──────────────────────────────── */}
+      <div className="map-overlay bottom-center" style={{ width: 380 }}>
+        <div className="overlay-title">Bounding Box</div>
+        <div className="bbox-grid">
+          <div className="bbox-input-wrap">
+            <span className="bbox-label">Lat Min</span>
+            <input
+              className="bbox-input"
+              type="number" step="0.5"
+              value={bbox.latMin}
+              onChange={e => setBbox(b => ({ ...b, latMin: Number(e.target.value) }))}
+            />
+          </div>
+          <div className="bbox-input-wrap">
+            <span className="bbox-label">Lat Max</span>
+            <input
+              className="bbox-input"
+              type="number" step="0.5"
+              value={bbox.latMax}
+              onChange={e => setBbox(b => ({ ...b, latMax: Number(e.target.value) }))}
+            />
+          </div>
+          <div className="bbox-input-wrap">
+            <span className="bbox-label">Lon Min</span>
+            <input
+              className="bbox-input"
+              type="number" step="0.5"
+              value={bbox.lonMin}
+              onChange={e => setBbox(b => ({ ...b, lonMin: Number(e.target.value) }))}
+            />
+          </div>
+          <div className="bbox-input-wrap">
+            <span className="bbox-label">Lon Max</span>
+            <input
+              className="bbox-input"
+              type="number" step="0.5"
+              value={bbox.lonMax}
+              onChange={e => setBbox(b => ({ ...b, lonMax: Number(e.target.value) }))}
+            />
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+          <select
+            className="form-select"
+            style={{ flex: 1, fontSize: 12 }}
+            value=""
+            onChange={e => {
+              const preset = BBOX_PRESETS.find(p => p.label === e.target.value)
+              if (preset) setBboxPreset(preset.bbox)
+            }}
+          >
+            <option value="" disabled>Quick select region…</option>
+            {presetGroups.map(group => (
+              <optgroup key={group} label={group}>
+                {BBOX_PRESETS.filter(p => p.group === group).map(p => (
+                  <option key={p.label} value={p.label}>{p.label}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <button className="btn secondary small" onClick={useViewportAsBbox} style={{ whiteSpace: 'nowrap' }}>
+            Use Viewport
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <button className="btn primary small" onClick={fetchData} disabled={loading}>
+            {loading ? 'Loading…' : '↺ Refresh'}
+          </button>
+          <span style={{
+            fontSize: 11, color: cellCount > 400_000 ? 'var(--yellow)' : 'var(--text-secondary)',
+          }}>
+            ~{cellCount.toLocaleString()} cells
+            {cellCount > 400_000 ? ' (may be slow)' : ''}
+          </span>
+          {onMapContext && (
+            <button
+              className="btn secondary small"
+              style={{ marginLeft: 'auto', fontSize: 11 }}
+              title="Ask the Weather Agent about this region"
+              onClick={() => {
+                const regionDesc = `bounding box lat ${bbox.latMin}°–${bbox.latMax}°N, lon ${bbox.lonMin}°–${bbox.lonMax}°E`
+                const msg = `What is the weather like in the region: ${regionDesc}?\n` +
+                            `Please summarise temperature, wind, pressure and cloud cover.`
+                onMapContext(msg)
+              }}
+            >
+              Ask Agent ✦
+            </button>
+          )}
+        </div>
+
+        {/* ── Save to Snowflake table ─────────────────────────── */}
+        <div style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+          <div className="overlay-title">Save to Snowflake Table</div>
+
+          {/* Table name input */}
+          <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+            <input
+              ref={tableInputRef}
+              className="bbox-input"
+              type="text"
+              value={tableName}
+              onChange={e => setTableName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_'))}
+              placeholder="TABLE_NAME"
+              style={{ flex: 1, fontFamily: 'monospace', fontSize: 11 }}
+            />
+          </div>
+
+          {/* Schema label + variable count */}
+          <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 8 }}>
+            ICECHUNK_DB.ICECHUNK &nbsp;·&nbsp;
+            {variableKeys.filter(v => !v.startsWith('cloud_amount_on_height')).length} variables
+            {cellCount < MAX_CELLS && data.length > 0
+              ? ` · ~${(data.length * variableKeys.filter(v => !v.startsWith('cloud_amount_on_height')).length).toLocaleString()} rows est.`
+              : ''}
+          </div>
+
+          {/* Format toggle: Long vs Wide */}
+          <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+            <button
+              className={`btn small ${!pivoted ? 'primary' : 'secondary'}`}
+              style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
+              onClick={() => setPivoted(false)}
+              title="Long format — one row per (variable, lat, lon). Best for filtering by variable."
+            >
+              Long
+            </button>
+            <button
+              className={`btn small ${pivoted ? 'primary' : 'secondary'}`}
+              style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
+              onClick={() => setPivoted(true)}
+              title="Wide format — one row per (lat, lon), one column per variable. Best for analysis."
+            >
+              Wide (pivot)
+            </button>
+          </div>
+
+          {/* Format description */}
+          <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 8 }}>
+            {pivoted
+              ? 'Columns: lat, lon, h3_cell, air_temperature, wind_speed_at_10m, …'
+              : 'Columns: variable, lat, lon, h3_cell, value'}
+          </div>
+
+          {/* Save button */}
+          <button
+            className="btn primary small"
+            style={{ width: '100%', justifyContent: 'center' }}
+            onClick={handleSaveTable}
+            disabled={saving || !tableName.trim() || cellCount > MAX_CELLS}
+          >
+            {saving ? 'Saving…' : '↓ Save to Table'}
+          </button>
+
+          {/* Success */}
+          {saveResult && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 11, color: 'var(--green)', marginBottom: 4 }}>
+                ✓ {saveResult.row_count.toLocaleString()} rows saved
+              </div>
+              <div style={{
+                fontSize: 10, fontFamily: 'monospace',
+                color: 'var(--text-secondary)',
+                wordBreak: 'break-all', marginBottom: 4,
+              }}>
+                {saveResult.table}
+              </div>
+              <button
+                className="btn secondary small"
+                style={{ fontSize: 10, padding: '2px 8px' }}
+                onClick={handleCopyTable}
+              >
+                {copied ? '✓ Copied' : 'Copy name'}
+              </button>
+            </div>
+          )}
+
+          {/* Error */}
+          {saveError && (
+            <div style={{ marginTop: 6, fontSize: 11, color: 'var(--red)' }}>
+              ⚠ {saveError}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Colour legend ──────────────────────────────────────── */}
+      <div className="map-overlay bottom-left color-legend">
+        <div className="overlay-title">
+          {varMeta.label}
+        </div>
+        <div
+          className="color-bar"
+          style={{ background: buildGradient(varMeta.colorScale) }}
+        />
+        <div className="color-labels">
+          <span>{formatValue(minVal, activeVar)}</span>
+          <span>{formatValue(maxVal, activeVar)}</span>
+        </div>
+      </div>
+    </div>
+  )
+}

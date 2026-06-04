@@ -1,0 +1,29 @@
+spec:
+  containers:
+  - name: icechunk-service
+    image: /icechunk_db/icechunk/icechunk_repo/icechunk-service:latest
+    env:
+      ICECHUNK_BUCKET: "icechunk-ro"
+      ICECHUNK_PREFIX: "met_office_global"
+      AWS_DEFAULT_REGION: "us-west-2"
+    secrets:
+    - snowflakeSecret:
+        objectName: ICECHUNK_DB.ICECHUNK.AWS_ACCESS_KEY_ID
+      envVarName: AWS_ACCESS_KEY_ID
+    - snowflakeSecret:
+        objectName: ICECHUNK_DB.ICECHUNK.AWS_SECRET_ACCESS_KEY
+      envVarName: AWS_SECRET_ACCESS_KEY
+    resources:
+      requests:
+        memory: 2Gi
+        cpu: 500m
+      limits:
+        memory: 4Gi
+        cpu: 1000m
+    readinessProbe:
+      port: 8080
+      path: /health
+  endpoints:
+  - name: http-endpoint
+    port: 8080
+    public: false

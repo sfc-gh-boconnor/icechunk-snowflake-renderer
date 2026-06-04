@@ -1,0 +1,26 @@
+# Credentials — never commit
+secrets/
+*.pem
+*.key
+.env
+.env.*
+
+# Node
+icechunk-accelerator/node_modules/
+icechunk-accelerator/dist/
+icechunk-accelerator/dist-server/
+icechunk-accelerator/.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Cortex Code internal state (not needed by end users)
+.cortex/conversations/
+.snowflake/

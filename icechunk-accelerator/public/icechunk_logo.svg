@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Snowflake-style ice crystal in Snowflake blue -->
+  <circle cx="32" cy="32" r="28" fill="#0D1117" stroke="#29B5E8" stroke-width="2"/>
+  <!-- Central chunk / cube -->
+  <polygon points="32,14 46,23 46,41 32,50 18,41 18,23" fill="none" stroke="#29B5E8" stroke-width="2"/>
+  <!-- Inner lines (Zarr-like grid) -->
+  <line x1="18" y1="23" x2="46" y2="23" stroke="#29B5E8" stroke-width="1" opacity="0.5"/>
+  <line x1="18" y1="32" x2="46" y2="32" stroke="#29B5E8" stroke-width="1" opacity="0.5"/>
+  <line x1="18" y1="41" x2="46" y2="41" stroke="#29B5E8" stroke-width="1" opacity="0.5"/>
+  <line x1="25" y1="14" x2="18" y2="41" stroke="#29B5E8" stroke-width="1" opacity="0.5"/>
+  <line x1="39" y1="14" x2="46" y2="41" stroke="#29B5E8" stroke-width="1" opacity="0.5"/>
+  <!-- Top spike -->
+  <line x1="32" y1="14" x2="32" y2="6" stroke="#29B5E8" stroke-width="2"/>
+  <line x1="28" y1="10" x2="36" y2="10" stroke="#29B5E8" stroke-width="1.5"/>
+  <!-- Bottom spike -->
+  <line x1="32" y1="50" x2="32" y2="58" stroke="#29B5E8" stroke-width="2"/>
+  <line x1="28" y1="54" x2="36" y2="54" stroke="#29B5E8" stroke-width="1.5"/>
+</svg>

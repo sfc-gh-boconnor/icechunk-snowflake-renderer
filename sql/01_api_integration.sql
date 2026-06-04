@@ -1,0 +1,13 @@
+-- 01_api_integration.sql
+-- Run after ICECHUNK_SERVICE ingress URL is available
+-- Replace <INGRESS_URL> with the value from:
+--   SHOW ENDPOINTS IN SERVICE ICECHUNK_DB.ICECHUNK.ICECHUNK_SERVICE;
+
+USE DATABASE ICECHUNK_DB;
+USE SCHEMA ICECHUNK;
+
+CREATE OR REPLACE API INTEGRATION ICECHUNK_API_INTEGRATION
+  API_PROVIDER = aws_api_gateway
+  API_AWS_ROLE_ARN = 'arn:aws:iam::484577546576:role/snowflake-icechunk-role'
+  API_ALLOWED_PREFIXES = ('https://<INGRESS_URL>/')
+  ENABLED = TRUE;
