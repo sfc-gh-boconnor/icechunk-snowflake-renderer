@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ScatterplotLayer, PolygonLayer } from '@deck.gl/layers'
+import { ScatterplotLayer, PolygonLayer, SolidPolygonLayer } from '@deck.gl/layers'
 import { H3HexagonLayer } from '@deck.gl/geo-layers'
 import { PickingInfo } from '@deck.gl/core'
 import MapView from '../shared/MapView'
@@ -186,8 +186,20 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
       let rows: Record<string, unknown>[]
       const snapExpr = selectedSnapshot ? `'${selectedSnapshot}'` : 'NULL'
 
-      if (dataset === 'uk') {
-        // UK 2km — always H3 (curvilinear grid, no 3D cloud)
+      if (dataset === 'uk' && renderMode === 'points') {
+        // UK 2km — raw grid points (WGS84 lat/lon pre-computed at ingest)
+        rows = await sfQuery(
+          `SELECT f.value:lat::FLOAT AS lat,
+                  f.value:lon::FLOAT AS lon,
+                  f.value:value::FLOAT AS value
+           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_SLICE_UK(
+             '${activeVar}', ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}
+           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
+          QUERY_DB,
+          QUERY_SCHEMA
+        )
+      } else if (dataset === 'uk') {
+        // UK 2km — H3 aggregated (default, fewer rows)
         rows = await sfQuery(
           `SELECT f.value:h3index::VARCHAR AS h3index,
                   f.value:value::FLOAT AS value
@@ -288,10 +300,16 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   }, [activeVar, varMeta, onMapContext])
 
   // Layer depends on both varMeta.is3D and renderMode:
-  // - 3D cloud → always ScatterplotLayer
+  // - 3D cloud → ScatterplotLayer (dots)
   // - 2D + H3 mode → H3HexagonLayer (h3index comes from Python backend)
-  // - 2D + points mode → ScatterplotLayer (raw lat/lon grid points)
-  const weatherLayer = varMeta.is3D || renderMode === 'points'
+  // - 2D + grid mode → SolidPolygonLayer (degree-based rectangles matching native grid spacing)
+  //
+  // Global 10km: ~0.09° spacing → half-extents 0.045° × 0.045°
+  // UK 2km:  lat range 18.85° / 970 rows ≈ 0.019°, lon range 33.73° / 1042 cols ≈ 0.032°
+  const halfDegLat = dataset === 'uk' ? 0.0097 : 0.045
+  const halfDegLon = dataset === 'uk' ? 0.0162 : 0.045
+
+  const weatherLayer = varMeta.is3D
     ? new ScatterplotLayer<WeatherPoint>({
         id: 'weather-scatter',
         data,
@@ -305,6 +323,29 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         opacity,
         updateTriggers: {
           getFillColor: [minVal, maxVal, activeVar, heightLevel],
+        },
+      })
+    : renderMode === 'points'
+    ? new SolidPolygonLayer<WeatherPoint>({
+        id: 'weather-grid',
+        data,
+        // Each polygon is the actual lat/lon cell rectangle for that grid point.
+        // halfDegLat/Lon are derived from the grid's degree-spacing so the cells
+        // tile seamlessly and correctly show rectangles at high latitudes (real shape).
+        getPolygon: d => [
+          [d.lon - halfDegLon, d.lat - halfDegLat],
+          [d.lon + halfDegLon, d.lat - halfDegLat],
+          [d.lon + halfDegLon, d.lat + halfDegLat],
+          [d.lon - halfDegLon, d.lat + halfDegLat],
+        ],
+        getFillColor: d => valueToRgba(d.value, minVal, maxVal, varMeta.colorScale),
+        getLineColor: [0, 0, 0, 0],
+        pickable: true,
+        onClick: handleLayerClick,
+        opacity,
+        updateTriggers: {
+          getFillColor: [minVal, maxVal, activeVar, heightLevel],
+          getPolygon:   [dataset],
         },
       })
     : new H3HexagonLayer<WeatherPoint>({
@@ -348,7 +389,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         ${d.height_m != null ? `<div style="color:#8A9BB0;font-size:11px">Height: ${d.height_m}m</div>` : ''}
         <div style="color:#8A9BB0;font-size:11px">${d.lat.toFixed(4)}°, ${d.lon.toFixed(4)}°</div>
         ${d.h3index ? `<div style="color:#8A9BB0;font-size:10px">H3 res ${h3Res}</div>` : ''}
-        ${renderMode === 'points' && d.lat ? `<div style="color:#8A9BB0;font-size:10px">${d.lat.toFixed(3)}°, ${d.lon.toFixed(3)}°</div>` : ''}
+        ${renderMode === 'points' && !d.h3index ? `<div style="color:#8A9BB0;font-size:10px">${dataset === 'uk' ? '~2km' : '~10km'} grid cell</div>` : ''}
         ${onMapContext ? `<div style="color:#29B5E8;font-size:10px;margin-top:3px">Click to ask agent ✦</div>` : ''}
       `,
       className: 'deck-tooltip',
@@ -546,8 +587,8 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           </div>
         )}
 
-        {/* Render mode toggle — global 2D only; UK always uses H3 */}
-        {!varMeta.is3D && dataset === 'global' && (
+        {/* Render mode toggle — available for all 2D datasets */}
+        {!varMeta.is3D && (
           <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
             <button
               className={`btn small ${renderMode === 'h3' ? 'primary' : 'secondary'}`}
@@ -561,9 +602,9 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
               className={`btn small ${renderMode === 'points' ? 'primary' : 'secondary'}`}
               style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
               onClick={() => setRenderMode('points')}
-              title="Raw grid points — exact positions"
+              title={`Native grid cells (${dataset === 'uk' ? '~2km squares' : '~10km squares'})`}
             >
-              • Points
+              ▦ Grid
             </button>
           </div>
         )}
@@ -571,7 +612,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         {/* Point count */}
         <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
           {data.length > 0
-            ? `${data.length.toLocaleString()} ${renderMode === 'h3' ? 'H3 cells' : 'points'}`
+            ? `${data.length.toLocaleString()} ${renderMode === 'h3' ? 'H3 cells' : dataset === 'uk' ? '2km grid cells' : '10km grid cells'}`
             : loading ? 'Loading…' : 'No data'}
           {renderMode === 'h3' && data.length > 0 && (
             <span style={{ marginLeft: 6 }}>res {h3Res}</span>
