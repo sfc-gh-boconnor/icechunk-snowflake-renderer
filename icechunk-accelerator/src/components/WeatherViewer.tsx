@@ -668,7 +668,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
       )}
 
       {/* ── Bounding box controls ──────────────────────────────── */}
-      <div className="map-overlay bottom-center" style={{ width: 380 }}>
+      <div className="map-overlay bottom-left" style={{ width: 380 }}>
         <div className="overlay-title">Bounding Box</div>
         <div className="bbox-grid">
           <div className="bbox-input-wrap">
@@ -854,7 +854,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
       </div>
 
       {/* ── Colour legend ──────────────────────────────────────── */}
-      <div className="map-overlay bottom-left color-legend">
+      <div className="map-overlay bottom-right color-legend">
         <div className="overlay-title">
           {varMeta.label}
         </div>

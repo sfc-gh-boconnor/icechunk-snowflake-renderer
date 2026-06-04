@@ -51,8 +51,28 @@ UK_SURFACE_FILES: dict[str, str] = {
 
 CHUNKS = (128, 128)
 
-# OSGB36 (EPSG:27700) → WGS84 (EPSG:4326); always_xy → (lon, lat)
-_PROJ = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
+# Lambert Azimuthal Equal Area (LAEA) → WGS84 (EPSG:4326)
+# CRS is defined in each file's grid_mapping variable:
+#   grid_mapping_name: lambert_azimuthal_equal_area
+#   longitude_of_projection_origin: -2.5
+#   latitude_of_projection_origin:  54.9
+#   semi_major_axis: 6378137.0  (WGS84)
+#   semi_minor_axis: 6356752.314140356
+#   false_easting/northing: 0.0
+# NOT OSGB36/BNG (EPSG:27700) — that is a Transverse Mercator with a
+# completely different origin and coordinate ranges.
+from pyproj import CRS
+_LAEA_UK = CRS.from_dict({
+    'proj':  'laea',
+    'lat_0': 54.9,
+    'lon_0': -2.5,
+    'x_0':   0.0,
+    'y_0':   0.0,
+    'a':     6378137.0,
+    'b':     6356752.314140356,
+    'units': 'm',
+})
+_PROJ = Transformer.from_crs(_LAEA_UK, "EPSG:4326", always_xy=True)
 
 
 def _anon_s3():
@@ -102,7 +122,7 @@ def _reproject_to_latlon(easting_1d: np.ndarray, northing_1d: np.ndarray):
             lon2d.reshape(E.shape).astype("float32"))
 
 
-def _get_osgb36_coords(ds: xr.Dataset):
+def _get_projected_coords(ds: xr.Dataset):
     for x_name in ("projection_x_coordinate", "x", "easting"):
         if x_name in ds.coords or x_name in ds:
             easting = ds[x_name].values.ravel().astype("float64"); break
@@ -160,7 +180,7 @@ def ingest_uk(run_stamp: Optional[str] = None) -> dict:
     logger.info(f"Downloaded {len(datasets)}/{len(UK_SURFACE_FILES)} variables")
 
     first_ds = next(iter(datasets.values()))
-    easting, northing = _get_osgb36_coords(first_ds)
+    easting, northing = _get_projected_coords(first_ds)
 
     logger.info("Reprojecting OSGB36 → WGS84...")
     lat2d, lon2d = _reproject_to_latlon(easting, northing)
