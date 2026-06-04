@@ -9,12 +9,16 @@ Variables and coordinate arrays are discovered dynamically from the Zarr group.
 
 Endpoints:
   POST /seed              write synthetic sample data → commit
+  POST /seed_uk           ingest UK 2km data from ASDI
   POST /slice             live slice query → rows for external function
-  GET|POST /meta          repo metadata, variables, snapshot, branches, tags
+  GET|POST /meta          global repo metadata
+  GET|POST /meta_uk       UK repo metadata
   GET  /branches          list branches
   GET|POST /health        readiness probe
   POST /snowflake/slice      Snowflake service function format wrapper
   POST /snowflake/slice_h3   H3-aggregated slice (Python computes cells, fewer rows)
+  POST /snowflake/slice_uk      UK 2km raw point slice
+  POST /snowflake/slice_h3_uk   UK 2km H3-aggregated slice (2D curvilinear coords)
 """
 import os
 import logging
@@ -29,7 +33,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from icechunk_client import open_or_create_repo, open_repo
+from icechunk_client import open_or_create_repo, open_repo, open_or_create_uk_repo, open_uk_repo
 from seeder import YEAR_START, LATS, LONS, TIMES
 
 logging.basicConfig(level=logging.INFO)
@@ -68,8 +72,10 @@ def _discover_variables(root: zarr.Group) -> list[str]:
 
 
 def _get_coords(root: zarr.Group):
-    """Return (lat_array, lon_array) from the Zarr group."""
-    # Try common names
+    """
+    Return (lat_array, lon_array) from the Zarr group.
+    Handles both 1D (global 10km) and 2D (UK 2km, curvilinear) coordinate arrays.
+    """
     lat = None
     lon = None
     for lat_name in ("latitude", "lat", "projection_y_coordinate"):
@@ -81,6 +87,64 @@ def _get_coords(root: zarr.Group):
             lon = np.array(root[lon_name][:])
             break
     return lat, lon
+
+
+def _slice_2d_curvilinear(
+    root: zarr.Group,
+    variable: str,
+    lat_min: float, lat_max: float,
+    lon_min: float, lon_max: float,
+    h3_res: Optional[int] = None,
+) -> dict:
+    """
+    Slice a variable from a curvilinear (2D coordinate) Zarr group.
+    Used for UK 2km data where lat/lon are 2D arrays.
+    """
+    lat2d = np.array(root["latitude"][:])
+    lon2d = np.array(root["longitude"][:])
+
+    mask = ((lat2d >= lat_min) & (lat2d <= lat_max) &
+            (lon2d >= lon_min) & (lon2d <= lon_max))
+
+    n_cells = int(mask.sum())
+    if n_cells == 0:
+        return {"data": [], "row_count": 0, "variable": variable,
+                "message": "No data in requested lat/lon range"}
+    if n_cells > 500_000:
+        raise HTTPException(status_code=400,
+            detail=f"Slice too large ({n_cells} cells). Narrow lat/lon range.")
+
+    variables = _discover_variables(root)
+    if variable not in variables:
+        raise HTTPException(status_code=400,
+            detail=f"Unknown variable '{variable}'. Available: {variables}")
+
+    arr = np.array(root[variable][:])
+    while arr.ndim > 2:
+        arr = arr[0]
+
+    arr_masked = np.where(mask, arr, np.nan)
+    rows_idx, cols_idx = np.where(mask & ~np.isnan(arr))
+
+    if h3_res is None:
+        source_rows = [
+            {"lat": round(float(lat2d[ri, ci]), 6),
+             "lon": round(float(lon2d[ri, ci]), 6),
+             "variable": variable,
+             "value": round(float(arr[ri, ci]), 6)}
+            for ri, ci in zip(rows_idx.tolist(), cols_idx.tolist())
+        ]
+        return {"data": source_rows, "row_count": len(source_rows), "variable": variable}
+    else:
+        cells: dict[str, list[float]] = defaultdict(list)
+        for ri, ci in zip(rows_idx.tolist(), cols_idx.tolist()):
+            cell = h3lib.latlng_to_cell(float(lat2d[ri, ci]), float(lon2d[ri, ci]), h3_res)
+            cells[cell].append(float(arr[ri, ci]))
+        aggregated = [{"h3index": cell, "value": round(float(np.mean(vals)), 6)}
+                      for cell, vals in cells.items()]
+        return {"data": aggregated, "variable": variable, "h3_res": h3_res,
+                "source_rows": len(rows_idx), "h3_cells": len(aggregated),
+                "row_count": len(aggregated)}
 
 
 def _find_index_range(coords: np.ndarray, lo: float, hi: float):
@@ -155,6 +219,104 @@ class SliceRequest(BaseModel):
 @app.post("/health")
 def health(payload: dict = None):
     return {"data": [[0, {"status": "ok"}]]}
+
+
+@app.post("/seed_uk")
+def seed_uk_data(payload: dict = None):
+    """Load Met Office UK 2km data from ASDI S3 and commit to the UK Icechunk repo."""
+    logger.info("ICECHUNK_SEED_UK called — starting UK 2km ingest")
+    try:
+        from ingest_uk import ingest_uk
+        result = ingest_uk()
+        logger.info(f"UK ingest complete: {result['grid']['nrows']}×{result['grid']['ncols']} grid")
+        return {"data": [[0, result]]}
+    except Exception as e:
+        logger.exception("UK 2km ingest failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/meta_uk")
+@app.post("/meta_uk")
+def uk_repo_meta(payload: dict = None):
+    """Return UK 2km repository metadata."""
+    try:
+        repo    = open_uk_repo()
+        session = repo.readonly_session("main")
+        root    = zarr.open_group(session.store, mode="r")
+        variables = _discover_variables(root)
+        lat2d = np.array(root["latitude"][:]) if "latitude" in root else None
+        lon2d = np.array(root["longitude"][:]) if "longitude" in root else None
+        result = {
+            "latest_snapshot": session.snapshot_id,
+            "branches":   list(repo.list_branches()),
+            "tags":       list(repo.list_tags()),
+            "variables":  variables,
+            "dataset":    "uk-deterministic-2km",
+            "resolution": "~2km",
+            "grid": {
+                "nrows":     int(lat2d.shape[0]) if lat2d is not None else None,
+                "ncols":     int(lat2d.shape[1]) if lat2d is not None else None,
+                "lat_range": [round(float(lat2d.min()), 4), round(float(lat2d.max()), 4)] if lat2d is not None else None,
+                "lon_range": [round(float(lon2d.min()), 4), round(float(lon2d.max()), 4)] if lon2d is not None else None,
+            },
+        }
+        return {"data": [[0, result]]}
+    except Exception as e:
+        logger.exception("UK meta failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/snowflake/slice_uk")
+def snowflake_slice_uk(payload: dict):
+    """Raw point slice from UK 2km repo. Same wire format as /snowflake/slice."""
+    try:
+        rows_out = []
+        for row in payload.get("data", []):
+            idx         = row[0]
+            variable    = str(row[1])
+            lat_min, lat_max = float(row[2]), float(row[3])
+            lon_min, lon_max = float(row[4]), float(row[5])
+            snapshot_id = str(row[6]) if len(row) > 6 and row[6] else None
+            repo    = open_uk_repo()
+            session = (repo.readonly_session(snapshot_id=snapshot_id)
+                       if snapshot_id else repo.readonly_session("main"))
+            root    = zarr.open_group(session.store, mode="r")
+            result  = _slice_2d_curvilinear(root, variable, lat_min, lat_max, lon_min, lon_max)
+            result["snapshot_id"] = session.snapshot_id
+            rows_out.append([idx, result])
+        return {"data": rows_out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Snowflake UK slice failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/snowflake/slice_h3_uk")
+def snowflake_slice_h3_uk(payload: dict):
+    """H3-aggregated slice from UK 2km repo. Same wire format as /snowflake/slice_h3."""
+    try:
+        rows_out = []
+        for row in payload.get("data", []):
+            idx         = row[0]
+            variable    = str(row[1])
+            lat_min, lat_max = float(row[2]), float(row[3])
+            lon_min, lon_max = float(row[4]), float(row[5])
+            snapshot_id = str(row[6]) if len(row) > 6 and row[6] else None
+            h3_res      = int(row[7]) if len(row) > 7 and row[7] is not None else 6
+            repo    = open_uk_repo()
+            session = (repo.readonly_session(snapshot_id=snapshot_id)
+                       if snapshot_id else repo.readonly_session("main"))
+            root    = zarr.open_group(session.store, mode="r")
+            result  = _slice_2d_curvilinear(root, variable, lat_min, lat_max, lon_min, lon_max, h3_res)
+            result["snapshot_id"] = session.snapshot_id
+            rows_out.append([idx, result])
+        return {"data": rows_out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Snowflake UK H3 slice failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/seed")

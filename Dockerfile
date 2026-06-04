@@ -2,13 +2,15 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System deps for numpy/icechunk/h5py
+# System deps for numpy/icechunk/h5py/pyproj
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libssl-dev \
     curl \
     libhdf5-dev \
     pkg-config \
+    libproj-dev \
+    proj-bin \
     && rm -rf /var/lib/apt/lists/*
 
 COPY app/requirements.txt .

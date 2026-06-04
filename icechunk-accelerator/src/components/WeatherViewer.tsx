@@ -19,6 +19,10 @@ import {
   BBox,
   BBOX_PRESETS,
   GLOBAL_BBOX,
+  UK_BBOX,
+  Dataset,
+  DATASETS,
+  UK_VARIABLES,
 } from '../types'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,6 +57,8 @@ interface WeatherViewerProps {
 
 export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed }: WeatherViewerProps) {
   const [activeVar, setActiveVar] = useState('air_temperature')
+  const [dataset, setDataset] = useState<Dataset>('global')
+  const datasetCfg = DATASETS.find(d => d.id === dataset)!
   const [bbox, setBbox] = useState<BBox>(GLOBAL_BBOX)
   const [heightLevel, setHeightLevel] = useState(0)
   const [heightM, setHeightM] = useState<number | null>(null)
@@ -89,10 +95,10 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   // H3 resolution derived from current zoom — Snowflake H3_LATLNG_TO_CELL uses this
   const h3Res = zoomToH3Res(viewState.zoom)
 
-  // Effective variable list — from snapshot metadata if available, else hardcoded
-  const availableVars = meta?.variables?.length
-    ? meta.variables.map(k => resolveVariableMeta(k))
-    : VARIABLES
+  // Effective variable list — UK dataset has its own fixed set
+  const availableVars = dataset === 'uk'
+    ? UK_VARIABLES.map(k => resolveVariableMeta(k))
+    : (meta?.variables?.length ? meta.variables.map(k => resolveVariableMeta(k)) : VARIABLES)
 
   const varMeta = useMemo(() => resolveVariableMeta(activeVar), [activeVar])
 
@@ -102,6 +108,16 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
       setActiveVar(meta.variables[0])
     }
   }, [meta])
+
+  // When dataset changes: zoom to its default bbox and validate active variable
+  useEffect(() => {
+    if (dataset === 'uk') {
+      setBboxPreset(UK_BBOX)
+      if (!UK_VARIABLES.includes(activeVar)) setActiveVar('air_temperature')
+    } else {
+      if (activeVar === 'visibility_at_screen_level') setActiveVar('air_temperature')
+    }
+  }, [dataset])
 
   // Reset color range to hints when variable changes
   useEffect(() => {
@@ -125,14 +141,13 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     setSaveError(null)
   }, [bbox, selectedSnapshot])
 
-  // ── Load repo metadata and available snapshots on mount ─────────────────────
+  // ── Load repo metadata and available snapshots on mount / dataset change ────
   useEffect(() => {
+    const metaSql = dataset === 'uk'
+      ? `SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_META_UK() AS result`
+      : `SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_META() AS result`
     const loadMeta = async () => {
-      const rows = await sfQuery(
-        `SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_META() AS result`,
-        QUERY_DB,
-        QUERY_SCHEMA
-      )
+      const rows = await sfQuery(metaSql, QUERY_DB, QUERY_SCHEMA)
       if (rows.length > 0) {
         const raw = rows[0].RESULT ?? rows[0].result
         setMeta(typeof raw === 'string' ? JSON.parse(raw) : raw as MetaResult)
@@ -140,16 +155,18 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     }
     const loadSnapshots = async () => {
       try {
-        const res = await fetch('/api/snapshots')
+        const endpoint = dataset === 'uk' ? '/api/snapshots?dataset=uk' : '/api/snapshots'
+        const res = await fetch(endpoint)
         if (res.ok) {
           const body = await res.json() as { snapshots: Array<{ tag: string; label: string; snapshotId: string }> }
           setSnapshots(body.snapshots ?? [])
         }
       } catch { /* non-critical */ }
     }
+    setMeta(null); setSnapshots([]); setSelectedSnapshot(null); setData([])
     loadMeta()
     loadSnapshots()
-  }, [])
+  }, [dataset])
 
   // ── Fetch weather data ───────────────────────────────────────────────────────
   // h3Res is included so a zoom-level change that crosses a resolution
@@ -167,41 +184,47 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     setLoading(true)
     try {
       let rows: Record<string, unknown>[]
+      const snapExpr = selectedSnapshot ? `'${selectedSnapshot}'` : 'NULL'
 
-      if (varMeta.is3D) {
-        // 3D cloud — always ScatterplotLayer, no H3
+      if (dataset === 'uk') {
+        // UK 2km — always H3 (curvilinear grid, no 3D cloud)
+        rows = await sfQuery(
+          `SELECT f.value:h3index::VARCHAR AS h3index,
+                  f.value:value::FLOAT AS value
+           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_SLICE_H3_UK(
+             '${activeVar}', ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}, ${h3Res}
+           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
+          QUERY_DB,
+          QUERY_SCHEMA
+        )
+      } else if (varMeta.is3D) {
         rows = await sfQuery(
           `SELECT f.value:lat::FLOAT AS lat, f.value:lon::FLOAT AS lon,
                   f.value:cloud_pct::FLOAT AS cloud_pct,
                   f.value:height_m::FLOAT AS height_m
            FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_CLOUD_AT_LEVEL(
-             ${heightLevel}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${selectedSnapshot ? `'${selectedSnapshot}'` : 'NULL'}
+             ${heightLevel}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}
            ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
           QUERY_DB,
           QUERY_SCHEMA
         )
       } else if (renderMode === 'h3') {
-        // H3 mode — ICECHUNK_SLICE_H3 aggregates in Python.
-        // Python returns one row per H3 cell (pre-aggregated mean), so:
-        //  - No per-row H3_LATLNG_TO_CELL in Snowflake SQL
-        //  - Far fewer rows returned (e.g. 9,984 source pts → ~2,000 cells at res 5)
         rows = await sfQuery(
           `SELECT f.value:h3index::VARCHAR AS h3index,
                   f.value:value::FLOAT AS value
            FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_SLICE_H3(
-             '${activeVar}', ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${selectedSnapshot ? `'${selectedSnapshot}'` : 'NULL'}, ${h3Res}
+             '${activeVar}', ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}, ${h3Res}
            ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
           QUERY_DB,
           QUERY_SCHEMA
         )
       } else {
-        // Points mode — raw grid points via ICECHUNK_SLICE, rendered as ScatterplotLayer
         rows = await sfQuery(
           `SELECT f.value:lat::FLOAT AS lat,
                   f.value:lon::FLOAT AS lon,
                   f.value:value::FLOAT AS value
            FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_SLICE(
-             '${activeVar}', ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${selectedSnapshot ? `'${selectedSnapshot}'` : 'NULL'}
+             '${activeVar}', ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}
            ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
           QUERY_DB,
           QUERY_SCHEMA
@@ -239,7 +262,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     } finally {
       setLoading(false)
     }
-  }, [activeVar, bbox, heightLevel, varMeta, selectedSnapshot, meta, h3Res, renderMode])
+  }, [activeVar, bbox, heightLevel, varMeta, selectedSnapshot, meta, h3Res, renderMode, dataset])
 
   useEffect(() => { fetchData() }, [fetchData])
 
@@ -443,6 +466,29 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         </div>
       )}
       <div className="map-overlay top-left">
+        {/* Dataset toggle */}
+        <div style={{ marginBottom: 10 }}>
+          <div className="overlay-title" style={{ marginBottom: 4 }}>Dataset</div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {DATASETS.map(d => (
+              <button
+                key={d.id}
+                className={`btn small ${dataset === d.id ? 'primary' : 'secondary'}`}
+                style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
+                onClick={() => setDataset(d.id as Dataset)}
+                title={d.description}
+              >
+                {d.label}
+              </button>
+            ))}
+          </div>
+          {dataset === 'uk' && (
+            <div style={{ fontSize: 10, color: 'var(--accent)', marginTop: 3 }}>
+              ~2km resolution · UK only · includes visibility
+            </div>
+          )}
+        </div>
+
         <div className="overlay-title">Variable</div>
 
         <div className="form-group" style={{ marginBottom: 12 }}>
@@ -500,8 +546,8 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           </div>
         )}
 
-        {/* Render mode toggle — always visible for 2D variables */}
-        {!varMeta.is3D && (
+        {/* Render mode toggle — global 2D only; UK always uses H3 */}
+        {!varMeta.is3D && dataset === 'global' && (
           <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
             <button
               className={`btn small ${renderMode === 'h3' ? 'primary' : 'secondary'}`}

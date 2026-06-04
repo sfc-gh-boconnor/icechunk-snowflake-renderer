@@ -148,6 +148,23 @@ export const VARIABLES: VariableMeta[] = [
     maxHint: 100,
   },
   {
+    key: 'visibility_at_screen_level',
+    label: 'Visibility',
+    unit: 'km',
+    is3D: false,
+    transform: v => v / 1000,
+    colorScale: [
+      [10, 20, 80],
+      [30, 80, 160],
+      [80, 150, 200],
+      [160, 210, 230],
+      [220, 240, 250],
+      [240, 248, 255],
+    ],
+    minHint: 0,
+    maxHint: 30,
+  },
+  {
     key: 'cloud_amount_of_high_cloud',
     label: 'High Cloud',
     unit: '%',
@@ -244,6 +261,9 @@ export function resolveVariableMeta(key: string): VariableMeta {
   if (k.includes('wind') || k.includes('speed')) {
     return { ...VARIABLE_MAP['wind_speed_at_10m'], key, label: key.replace(/_/g, ' ') }
   }
+  if (k.includes('visibility') || k === 'vis') {
+    return { ...VARIABLE_MAP['visibility_at_screen_level'], key, label: key.replace(/_/g, ' ') }
+  }
 
   // Generic fallback — auto-range from actual data
   return {
@@ -332,3 +352,43 @@ export const BBOX_PRESETS: BBoxPreset[] = [
 export const UK_BBOX:     BBox = BBOX_PRESETS.find(p => p.label === 'UK & Ireland')!.bbox
 export const EUROPE_BBOX: BBox = BBOX_PRESETS.find(p => p.label === 'Europe')!.bbox
 export const GLOBAL_BBOX: BBox = BBOX_PRESETS.find(p => p.label === 'Global')!.bbox
+
+// ── Dataset configuration ─────────────────────────────────────────────────────
+
+export type Dataset = 'global' | 'uk'
+
+export interface DatasetConfig {
+  id: Dataset
+  label: string
+  description: string
+  sliceH3Function: string
+  defaultBbox: BBox
+}
+
+export const DATASETS: DatasetConfig[] = [
+  {
+    id: 'global',
+    label: '🌍 Global 10km',
+    description: 'Met Office Global Deterministic 10km — worldwide coverage',
+    sliceH3Function: 'ICECHUNK_SLICE_H3',
+    defaultBbox: { latMin: -90, latMax: 90, lonMin: -180, lonMax: 180 },
+  },
+  {
+    id: 'uk',
+    label: '🇬🇧 UK 2km',
+    description: 'Met Office UK Deterministic 2km — high-resolution UK + visibility',
+    sliceH3Function: 'ICECHUNK_SLICE_H3_UK',
+    defaultBbox: { latMin: 49, latMax: 61, lonMin: -11, lonMax: 2 },
+  },
+]
+
+/** Variables available in the UK 2km dataset */
+export const UK_VARIABLES: string[] = [
+  'air_temperature',
+  'lwe_precipitation_rate',
+  'wind_speed_at_10m',
+  'air_pressure_at_sea_level',
+  'relative_humidity',
+  'cloud_amount_of_total_cloud',
+  'visibility_at_screen_level',
+]
