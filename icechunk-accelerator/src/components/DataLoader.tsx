@@ -139,24 +139,56 @@ export default function DataLoader() {
     : runDate
   const onDateChange = (v: string) => setRunDate(v.replace(/-/g, ''))
 
+  // ─── Tab state ────────────────────────────────────────────────────────────
+  const [tab, setTab] = useState<'global' | 'uk'>('global')
+
   return (
     <div className="app-main scrollable">
       <div style={{ maxWidth: 680 }}>
 
-        {/* ── Header ──────────────────────────────────────────────── */}
-        <div style={{ marginBottom: 24 }}>
-          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>
+        {/* ── Header + tab switcher ────────────────────────────────── */}
+        <div style={{ marginBottom: 20 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>
             Met Office Data Loader
           </h2>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 13, lineHeight: 1.6 }}>
+          <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--border)', paddingBottom: 0 }}>
+            {([
+              { id: 'global', label: '🌍 Global 10km' },
+              { id: 'uk',     label: '🇬🇧 UK 2km' },
+            ] as const).map(t => (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                style={{
+                  padding: '7px 18px',
+                  fontSize: 13,
+                  fontWeight: tab === t.id ? 600 : 400,
+                  color: tab === t.id ? 'var(--accent)' : 'var(--text-secondary)',
+                  background: 'none',
+                  border: 'none',
+                  borderBottom: tab === t.id ? '2px solid var(--accent)' : '2px solid transparent',
+                  cursor: 'pointer',
+                  marginBottom: -1,
+                  transition: 'color 0.15s, border-color 0.15s',
+                }}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* ═══════════════════════ GLOBAL TAB ═══════════════════════════ */}
+        {tab === 'global' && (<>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
             Download NetCDF files from the Met Office Global Deterministic 10km model
-            (public ASDI S3 bucket) and store them as Icechunk Zarr arrays in
+            (public ASDI S3 bucket) and store them as Icechunk Zarr arrays in{' '}
             <code style={{ background: 'var(--surface-2)', padding: '1px 5px', borderRadius: 3, fontSize: 12 }}>
-              {' '}s3://icechunk-ro/met_office_global/{' '}
+              s3://icechunk-ro/met_office_global/
             </code>.
           </p>
           <div style={{
-            marginTop: 8, padding: '8px 12px',
+            marginBottom: 16, padding: '8px 12px',
             background: 'rgba(229,161,0,0.1)', border: '1px solid rgba(229,161,0,0.3)',
             borderRadius: 6, fontSize: 12, color: 'var(--yellow)',
           }}>
@@ -164,225 +196,164 @@ export default function DataLoader() {
             the latest available Met Office run from ASDI automatically. Today&apos;s run
             is typically published 3–6 hours after the model valid time.
           </div>
-        </div>
 
-        {/* ── Current repo state ───────────────────────────────────── */}
-        <div className="panel" style={{ marginBottom: 16 }}>
-          <div className="panel-title">Repository State</div>
-          {!meta ? (
-            <button className="btn secondary small" onClick={loadRepo} disabled={loadingMeta}>
-              {loadingMeta ? <><span className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }} /> Loading…</> : '↺ Load Repo Info'}
-            </button>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <div className="grid-3">
-                <div className="metric-card">
-                  <div className="metric-value" style={{ fontSize: 16 }}>
-                    {meta.variables.length}
+          {/* ── Current repo state ───────────────────────────────────── */}
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <div className="panel-title">Repository State</div>
+            {!meta ? (
+              <button className="btn secondary small" onClick={loadRepo} disabled={loadingMeta}>
+                {loadingMeta ? <><span className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }} /> Loading…</> : '↺ Load Repo Info'}
+              </button>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div className="grid-3">
+                  <div className="metric-card">
+                    <div className="metric-value" style={{ fontSize: 16 }}>{meta.variables.length}</div>
+                    <div className="metric-label">Variables</div>
                   </div>
-                  <div className="metric-label">Variables</div>
+                  <div className="metric-card">
+                    <div className="metric-value" style={{ fontSize: 16 }}>
+                      {(meta.grid.lat_count * meta.grid.lon_count / 1e6).toFixed(1)}M
+                    </div>
+                    <div className="metric-label">Grid Points</div>
+                  </div>
+                  <div className="metric-card">
+                    <div className="metric-value" style={{ fontSize: 14 }}>
+                      {meta.latest_snapshot.slice(0, 12)}
+                    </div>
+                    <div className="metric-label">Latest Snapshot</div>
+                  </div>
                 </div>
-                <div className="metric-card">
-                  <div className="metric-value" style={{ fontSize: 16 }}>
-                    {(meta.grid.lat_count * meta.grid.lon_count / 1e6).toFixed(1)}M
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>Tags</div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {meta.tags.map(t => (
+                      <span key={t} className="badge blue" style={{ fontSize: 11 }}>{t}</span>
+                    ))}
+                    {meta.tags.length === 0 && (
+                      <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>none</span>
+                    )}
                   </div>
-                  <div className="metric-label">Grid Points</div>
-                </div>
-                <div className="metric-card">
-                  <div className="metric-value" style={{ fontSize: 14 }}>
-                    {meta.latest_snapshot.slice(0, 12)}
-                  </div>
-                  <div className="metric-label">Latest Snapshot</div>
                 </div>
               </div>
-              <div>
-                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
-                  Tags
-                </div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {meta.tags.map(t => (
-                    <span key={t} className="badge blue" style={{ fontSize: 11 }}>{t}</span>
-                  ))}
-                  {meta.tags.length === 0 && (
-                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>none</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* ── Model run selection ────────────────────────────────────── */}
-        <div className="panel" style={{ marginBottom: 16 }}>
-          <div className="panel-title">Model Run</div>
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-            <div className="form-group" style={{ flex: 1, minWidth: 160 }}>
-              <label className="form-label">Date</label>
-              <input
-                type="date"
-                className="form-input"
-                value={dateInputValue}
-                onChange={e => onDateChange(e.target.value)}
-                max={new Date().toISOString().slice(0, 10)}
-              />
-            </div>
-            <div className="form-group" style={{ width: 140 }}>
-              <label className="form-label">Time (UTC)</label>
-              <select
-                className="form-select"
-                value={runTime}
-                onChange={e => setRunTime(e.target.value)}
-              >
-                {TIME_SLOTS.map(t => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
-            Run stamp: <code style={{ color: 'var(--accent)' }}>{runStamp}</code>
-            {' — '}
-            <a
-              href={`https://registry.opendata.aws/met-office-global-deterministic/`}
-              target="_blank"
-              rel="noreferrer"
-              style={{ color: 'var(--accent)' }}
-            >
-              ASDI listing ↗
-            </a>
-          </div>
-        </div>
-
-        {/* ── Variable selection ────────────────────────────────────── */}
-        <div className="panel" style={{ marginBottom: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-            <div className="panel-title" style={{ marginBottom: 0 }}>Variables to Load</div>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button className="btn secondary small" onClick={selectSurface}>Surface</button>
-              <button className="btn secondary small" onClick={selectAll}>All</button>
-              <button className="btn secondary small" onClick={selectNone}>None</button>
-            </div>
-          </div>
-          <div className="checkbox-list">
-            {INGEST_FILES.map(f => (
-              <label key={f.filename} className="checkbox-item">
-                <input
-                  type="checkbox"
-                  checked={selectedFiles.has(f.filename)}
-                  onChange={() => toggleFile(f.filename)}
-                />
-                <span>{f.label}</span>
-                {f.sizeMb > 20 && (
-                  <span className="badge dim-3d" style={{ fontSize: 10, marginLeft: 4 }}>3D</span>
-                )}
-                <span className="var-size">{f.sizeMb.toFixed(1)} MB</span>
-              </label>
-            ))}
-          </div>
-          <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
-            Selected: {selectedFiles.size} files — ~{totalMb.toFixed(0)} MB download
-          </div>
-        </div>
-
-        {/* ── Load button & status ──────────────────────────────────── */}
-        <div className="panel">
-          <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
-            <button
-              className="btn primary"
-              onClick={handleLoad}
-              disabled={status === 'loading' || selectedFiles.size === 0}
-              style={{ display: 'flex', alignItems: 'center', gap: 8 }}
-            >
-              {status === 'loading' ? (
-                <><Loader size={15} style={{ animation: 'spin 0.7s linear infinite' }} /> Loading…</>
-              ) : (
-                <><Download size={15} /> Load {selectedFiles.size} file{selectedFiles.size !== 1 ? 's' : ''}</>
-              )}
-            </button>
-            {status === 'loading' && (
-              <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                Downloading from ASDI S3 and writing to Icechunk…
-              </span>
             )}
           </div>
 
-          {status === 'loading' && (
-            <div className="progress-bar" style={{ marginBottom: 12 }}>
-              <div
-                className="progress-fill"
-                style={{ width: '100%', animation: 'progIndeterminate 1.5s ease-in-out infinite' }}
-              />
-            </div>
-          )}
-
-          {status === 'done' && result && (
-            <div style={{
-              background: 'rgba(13,176,72,0.1)', border: '1px solid rgba(13,176,72,0.3)',
-              borderRadius: 'var(--radius)', padding: 12,
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                <CheckCircle size={16} color="var(--green)" />
-                <span style={{ fontWeight: 600, color: 'var(--green)' }}>Load successful</span>
+          {/* ── Model run selection ────────────────────────────────────── */}
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <div className="panel-title">Model Run</div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <div className="form-group" style={{ flex: 1, minWidth: 160 }}>
+                <label className="form-label">Date</label>
+                <input
+                  type="date"
+                  className="form-input"
+                  value={dateInputValue}
+                  onChange={e => onDateChange(e.target.value)}
+                  max={new Date().toISOString().slice(0, 10)}
+                />
               </div>
-              {result.snapshot_id && (
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                  Snapshot: <code style={{ color: 'var(--accent)' }}>{result.snapshot_id}</code>
-                </div>
-              )}
-              {result.message && (
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>
-                  {result.message}
-                </div>
-              )}
+              <div className="form-group" style={{ width: 140 }}>
+                <label className="form-label">Time (UTC)</label>
+                <select className="form-select" value={runTime} onChange={e => setRunTime(e.target.value)}>
+                  {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
             </div>
-          )}
+            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
+              Run stamp: <code style={{ color: 'var(--accent)' }}>{runStamp}</code>
+              {' — '}
+              <a href="https://registry.opendata.aws/met-office-global-deterministic/" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>
+                ASDI listing ↗
+              </a>
+            </div>
+          </div>
 
-          {status === 'error' && result?.error && (
-            <div style={{
-              background: 'rgba(229,72,77,0.1)', border: '1px solid rgba(229,72,77,0.3)',
-              borderRadius: 'var(--radius)', padding: 12,
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                <AlertCircle size={16} color="var(--red)" />
-                <span style={{ fontWeight: 600, color: 'var(--red)' }}>
-                  {result.tag_conflict ? 'IceChunk tag conflict' : 'Load failed'}
+          {/* ── Variable selection ────────────────────────────────────── */}
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+              <div className="panel-title" style={{ marginBottom: 0 }}>Variables to Load</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="btn secondary small" onClick={selectSurface}>Surface</button>
+                <button className="btn secondary small" onClick={selectAll}>All</button>
+                <button className="btn secondary small" onClick={selectNone}>None</button>
+              </div>
+            </div>
+            <div className="checkbox-list">
+              {INGEST_FILES.map(f => (
+                <label key={f.filename} className="checkbox-item">
+                  <input type="checkbox" checked={selectedFiles.has(f.filename)} onChange={() => toggleFile(f.filename)} />
+                  <span>{f.label}</span>
+                  {f.sizeMb > 20 && <span className="badge dim-3d" style={{ fontSize: 10, marginLeft: 4 }}>3D</span>}
+                  <span className="var-size">{f.sizeMb.toFixed(1)} MB</span>
+                </label>
+              ))}
+            </div>
+            <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
+              Selected: {selectedFiles.size} files — ~{totalMb.toFixed(0)} MB download
+            </div>
+          </div>
+
+          {/* ── Load button & status ──────────────────────────────────── */}
+          <div className="panel">
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+              <button
+                className="btn primary"
+                onClick={handleLoad}
+                disabled={status === 'loading' || selectedFiles.size === 0}
+                style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+              >
+                {status === 'loading'
+                  ? <><Loader size={15} style={{ animation: 'spin 0.7s linear infinite' }} /> Loading…</>
+                  : <><Download size={15} /> Load {selectedFiles.size} file{selectedFiles.size !== 1 ? 's' : ''}</>}
+              </button>
+              {status === 'loading' && (
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                  Downloading from ASDI S3 and writing to Icechunk…
                 </span>
-              </div>
-              {result.tag_conflict ? (
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                  <code>ICECHUNK_SEED()</code> tries to create an immutable <code>v1.0</code> tag
-                  on every call, but it already exists from the initial load.
-                  This is a bug in the Python service — it needs to skip tag creation
-                  when the tag already exists. Contact the service owner to fix <code>ICECHUNK_SEED()</code>.
-                </div>
-              ) : (
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{result.error}</div>
               )}
             </div>
-          )}
-        </div>
+            {status === 'loading' && (
+              <div className="progress-bar" style={{ marginBottom: 12 }}>
+                <div className="progress-fill" style={{ width: '100%', animation: 'progIndeterminate 1.5s ease-in-out infinite' }} />
+              </div>
+            )}
+            {status === 'done' && result && (
+              <div style={{ background: 'rgba(13,176,72,0.1)', border: '1px solid rgba(13,176,72,0.3)', borderRadius: 'var(--radius)', padding: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <CheckCircle size={16} color="var(--green)" />
+                  <span style={{ fontWeight: 600, color: 'var(--green)' }}>Load successful</span>
+                </div>
+                {result.snapshot_id && <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Snapshot: <code style={{ color: 'var(--accent)' }}>{result.snapshot_id}</code></div>}
+                {result.message && <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>{result.message}</div>}
+              </div>
+            )}
+            {status === 'error' && result?.error && (
+              <div style={{ background: 'rgba(229,72,77,0.1)', border: '1px solid rgba(229,72,77,0.3)', borderRadius: 'var(--radius)', padding: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <AlertCircle size={16} color="var(--red)" />
+                  <span style={{ fontWeight: 600, color: 'var(--red)' }}>
+                    {result.tag_conflict ? 'IceChunk tag conflict' : 'Load failed'}
+                  </span>
+                </div>
+                {result.tag_conflict ? (
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                    <code>ICECHUNK_SEED()</code> tried to create a tag that already exists. This is harmless — the data was loaded. Re-run to update to a newer run.
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{result.error}</div>
+                )}
+              </div>
+            )}
+          </div>
+        </>)}
 
-        <style>{`
-          @keyframes progIndeterminate {
-            0%   { transform: translateX(-100%); width: 60%; }
-            50%  { transform: translateX(70%);  width: 60%; }
-            100% { transform: translateX(200%); width: 60%; }
-          }
-        `}</style>
-
-        {/* ═══ UK 2km section ══════════════════════════════════════════ */}
-        <div style={{
-          marginTop: 40,
-          paddingTop: 32,
-          borderTop: '1px solid var(--border)',
-        }}>
-          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>
-            UK Deterministic 2km Data Loader
-          </h2>
+        {/* ═══════════════════════ UK TAB ═══════════════════════════════ */}
+        {tab === 'uk' && (<>
           <p style={{ color: 'var(--text-secondary)', fontSize: 13, lineHeight: 1.6, marginBottom: 16 }}>
             Download the latest hourly run of the Met Office UK Deterministic 2km model
-            from the ASDI S3 bucket, reproject from OSGB36 (British National Grid) to
-            WGS84, and store as an IceChunk Zarr array in{' '}
+            from the ASDI S3 bucket, reproject from Lambert Azimuthal Equal Area to WGS84,
+            and store as an IceChunk Zarr array in{' '}
             <code style={{ background: 'var(--surface-2)', padding: '1px 5px', borderRadius: 3, fontSize: 12 }}>
               s3://icechunk-ro/met_office_uk_2km/
             </code>.
@@ -401,15 +372,14 @@ export default function DataLoader() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div className="grid-3">
                   <div className="metric-card">
-                    <div className="metric-value" style={{ fontSize: 16 }}>
-                      {ukMeta.variables.length}
-                    </div>
+                    <div className="metric-value" style={{ fontSize: 16 }}>{ukMeta.variables.length}</div>
                     <div className="metric-label">Variables</div>
                   </div>
                   <div className="metric-card">
                     <div className="metric-value" style={{ fontSize: 16 }}>
                       {ukMeta.grid
-                        ? ((ukMeta.grid.lat_count ?? 0) * (ukMeta.grid.lon_count ?? 0) / 1e6).toFixed(1) + 'M'
+                        ? (((ukMeta.grid as {nrows?:number; ncols?:number}).nrows ?? 0) *
+                           ((ukMeta.grid as {nrows?:number; ncols?:number}).ncols ?? 0) / 1e6).toFixed(1) + 'M'
                         : '—'}
                     </div>
                     <div className="metric-label">Grid Points</div>
@@ -450,11 +420,9 @@ export default function DataLoader() {
                 disabled={ukStatus === 'loading'}
                 style={{ display: 'flex', alignItems: 'center', gap: 8 }}
               >
-                {ukStatus === 'loading' ? (
-                  <><Loader size={15} style={{ animation: 'spin 0.7s linear infinite' }} /> Loading…</>
-                ) : (
-                  <><Download size={15} /> Seed UK 2km Data</>
-                )}
+                {ukStatus === 'loading'
+                  ? <><Loader size={15} style={{ animation: 'spin 0.7s linear infinite' }} /> Loading…</>
+                  : <><Download size={15} /> Seed UK 2km Data</>}
               </button>
               {ukStatus === 'loading' && (
                 <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
@@ -462,50 +430,28 @@ export default function DataLoader() {
                 </span>
               )}
             </div>
-
             {ukStatus === 'loading' && (
               <div className="progress-bar" style={{ marginBottom: 12 }}>
-                <div
-                  className="progress-fill"
-                  style={{ width: '100%', animation: 'progIndeterminate 1.5s ease-in-out infinite' }}
-                />
+                <div className="progress-fill" style={{ width: '100%', animation: 'progIndeterminate 1.5s ease-in-out infinite' }} />
               </div>
             )}
-
             {ukStatus === 'done' && ukResult && (
-              <div style={{
-                background: 'rgba(13,176,72,0.1)', border: '1px solid rgba(13,176,72,0.3)',
-                borderRadius: 'var(--radius)', padding: 12,
-              }}>
+              <div style={{ background: 'rgba(13,176,72,0.1)', border: '1px solid rgba(13,176,72,0.3)', borderRadius: 'var(--radius)', padding: 12 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                   <CheckCircle size={16} color="var(--green)" />
                   <span style={{ fontWeight: 600, color: 'var(--green)' }}>UK seed successful</span>
                 </div>
-                {ukResult.snapshot_id && (
-                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                    Snapshot: <code style={{ color: 'var(--accent)' }}>{ukResult.snapshot_id}</code>
-                  </div>
-                )}
-                {ukResult.message && (
-                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>
-                    {ukResult.message}
-                  </div>
-                )}
+                {ukResult.snapshot_id && <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Snapshot: <code style={{ color: 'var(--accent)' }}>{ukResult.snapshot_id}</code></div>}
+                {ukResult.message && <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>{ukResult.message}</div>}
                 {ukResult.variables && ukResult.variables.length > 0 && (
                   <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    {ukResult.variables.map(v => (
-                      <span key={v} className="badge blue" style={{ fontSize: 11 }}>{v}</span>
-                    ))}
+                    {ukResult.variables.map(v => <span key={v} className="badge blue" style={{ fontSize: 11 }}>{v}</span>)}
                   </div>
                 )}
               </div>
             )}
-
             {ukStatus === 'error' && ukResult?.error && (
-              <div style={{
-                background: 'rgba(229,72,77,0.1)', border: '1px solid rgba(229,72,77,0.3)',
-                borderRadius: 'var(--radius)', padding: 12,
-              }}>
+              <div style={{ background: 'rgba(229,72,77,0.1)', border: '1px solid rgba(229,72,77,0.3)', borderRadius: 'var(--radius)', padding: 12 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                   <AlertCircle size={16} color="var(--red)" />
                   <span style={{ fontWeight: 600, color: 'var(--red)' }}>UK seed failed</span>
@@ -514,7 +460,15 @@ export default function DataLoader() {
               </div>
             )}
           </div>
-        </div>
+        </>)}
+
+        <style>{`
+          @keyframes progIndeterminate {
+            0%   { transform: translateX(-100%); width: 60%; }
+            50%  { transform: translateX(70%);  width: 60%; }
+            100% { transform: translateX(200%); width: 60%; }
+          }
+        `}</style>
       </div>
     </div>
   )
