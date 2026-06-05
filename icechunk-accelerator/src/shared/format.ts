@@ -1,5 +1,37 @@
 import { VariableMeta } from '../types'
 
+// ── Named colour palettes ─────────────────────────────────────────────────────
+// Each is a list of RGB stops (low → high) that valueToRgba interpolates between.
+
+export type PaletteKey =
+  | 'auto'       // use the variable's own colorScale
+  | 'viridis'
+  | 'plasma'
+  | 'inferno'
+  | 'magma'
+  | 'thermal'
+  | 'blues'
+  | 'reds'
+  | 'greens'
+  | 'spectral'
+
+export interface Palette {
+  label: string
+  scale: [number, number, number][]
+}
+
+export const PALETTES: Record<Exclude<PaletteKey, 'auto'>, Palette> = {
+  viridis:  { label: 'Viridis',  scale: [[68,1,84],[59,82,139],[33,145,140],[94,201,98],[253,231,37]] },
+  plasma:   { label: 'Plasma',   scale: [[13,8,135],[126,3,168],[204,71,120],[248,149,64],[240,249,33]] },
+  inferno:  { label: 'Inferno',  scale: [[0,0,4],[87,15,109],[188,55,84],[249,142,9],[252,255,164]] },
+  magma:    { label: 'Magma',    scale: [[0,0,4],[79,18,123],[183,55,121],[252,137,97],[252,253,191]] },
+  thermal:  { label: 'Thermal',  scale: [[5,48,97],[33,102,172],[103,169,207],[209,229,240],[253,219,199],[239,138,98],[178,24,43]] },
+  blues:    { label: 'Blues',    scale: [[247,251,255],[198,219,239],[107,174,214],[33,113,181],[8,48,107]] },
+  reds:     { label: 'Reds',     scale: [[255,245,240],[252,187,161],[252,109,76],[203,24,29],[103,0,13]] },
+  greens:   { label: 'Greens',   scale: [[247,252,245],[199,233,192],[116,196,118],[35,139,69],[0,68,27]] },
+  spectral: { label: 'Spectral', scale: [[94,79,162],[50,136,189],[171,221,164],[255,255,191],[253,174,97],[213,62,79],[158,1,66]] },
+}
+
 /**
  * Interpolate between two RGB colours.
  * t = 0 → lo, t = 1 → hi

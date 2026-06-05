@@ -9,6 +9,8 @@ import {
   formatValue,
   buildGradient,
   estimateCellCount,
+  PALETTES,
+  PaletteKey,
 } from '../shared/format'
 import {
   VARIABLES,
@@ -66,6 +68,12 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   const [heightLevel, setHeightLevel] = useState(0)
   const [heightM, setHeightM] = useState<number | null>(null)
   const [totalLevels, setTotalLevels] = useState(33)
+  // Pre-fetched level cache for 3D variables — keyed by level index.
+  // Populated by prefetchAllLevels(); slider changes read from here (instant).
+  const [levelCache, setLevelCache] = useState<Map<number, WeatherPoint[]>>(new Map())
+  const [loadingLevels, setLoadingLevels] = useState(false)
+  const [levelsLoaded, setLevelsLoaded] = useState(0)
+  const prefetchGenRef = useRef(0)  // increment to cancel in-flight prefetch
   const [data, setData] = useState<WeatherPoint[]>([])
   const [meta, setMeta] = useState<MetaResult | null>(null)
   const [loading, setLoading] = useState(false)
@@ -74,6 +82,8 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   // 'h3' (default) uses ICECHUNK_SLICE_H3 — Python-aggregated, fewer rows, fastest
   // 'points' uses ICECHUNK_SLICE — raw grid points rendered as SolidPolygonLayer
   const [renderMode, setRenderMode] = useState<'h3' | 'points'>('h3')
+  // 'auto' = use variable's built-in colorScale; anything else = override palette
+  const [colorScheme, setColorScheme] = useState<PaletteKey>('auto')
   const [minVal, setMinVal] = useState(() => VARIABLE_MAP['air_temperature'].minHint)
   const [maxVal, setMaxVal] = useState(() => VARIABLE_MAP['air_temperature'].maxHint)
   const [snapshots, setSnapshots] = useState<Array<{ tag: string; label: string; snapshotId: string }>>([])  
@@ -100,14 +110,15 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   const h3Res = zoomToH3Res(viewState.zoom)
 
   // Effective variable list:
-  // - UK: fixed set (2km dataset has specific vars)
-  // - Global: always use the full VARIABLES list from types.ts so that
-  //   cloud_amount_on_height_levels (3D) is always selectable.
-  //   meta.variables only reflects the *main* branch snapshot, not the
-  //   cloud snapshot the user may have selected.
+  // - UK: uses UK_VARIABLES (surface + 3D height/pressure level vars)
+  // - Global: all surface VARIABLES + cloud_amount_on_height_levels (the only 3D var
+  //   in the global 10km repo). Pressure/height-level vars are UK-only and excluded.
   const availableVars = dataset === 'uk'
     ? UK_VARIABLES.map(k => resolveVariableMeta(k))
-    : VARIABLES.filter(v => v.key !== 'visibility_at_screen_level')
+    : VARIABLES.filter(v =>
+        v.key !== 'visibility_at_screen_level' &&
+        (!v.is3D || v.key === 'cloud_amount_on_height_levels')
+      )
 
   const varMeta = useMemo(() => resolveVariableMeta(activeVar), [activeVar])
 
@@ -182,13 +193,169 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     loadSnapshots()
   }, [dataset])
 
-  // ── Fetch weather data ───────────────────────────────────────────────────────
-  // h3Res is included so a zoom-level change that crosses a resolution
-  // boundary will trigger a re-fetch with the correct H3 resolution baked
-  // into the Snowflake query.
+  // ── Row → WeatherPoint mapping (shared by fetchData and prefetchAllLevels) ──
+  const mapRowsToPoints = useCallback((rows: Record<string, unknown>[]): WeatherPoint[] => {
+    return rows.map(r => {
+      const isH3Cloud = varMeta.is3D && renderMode === 'h3'
+      const isUk3D    = varMeta.is3D && dataset === 'uk'
+      const raw = isH3Cloud
+        ? Number(r.VALUE ?? r.value ?? 0)
+        : varMeta.is3D && !isUk3D
+        ? Number(r.CLOUD_PCT ?? r.cloud_pct ?? 0)
+        : Number(r.VALUE ?? r.value ?? 0)
+      const lv = r.LEVEL_VALUE ?? r.level_value ?? r.HEIGHT_M ?? r.height_m
+      const lu = r.LEVEL_UNITS ?? r.level_units
+      return {
+        lat:         Number(r.LAT ?? r.lat),
+        lon:         Number(r.LON ?? r.lon),
+        h3index:     r.H3INDEX != null ? String(r.H3INDEX) : r.h3index != null ? String(r.h3index) : undefined,
+        value:       varMeta.transform(raw),
+        cloud_pct:   r.CLOUD_PCT != null ? Number(r.CLOUD_PCT) : r.cloud_pct != null ? Number(r.cloud_pct) : undefined,
+        height_m:    lv != null ? Number(lv) : undefined,
+        level_units: lu != null ? String(lu) : undefined,
+      }
+    })
+  }, [varMeta, renderMode, dataset])
+
+  // ── Build SQL for a single 3D level (used by prefetchAllLevels) ───────────
+  const buildLevel3dSql = useCallback((level: number): string => {
+    // Only use a snapshot ID if it belongs to the current dataset's snapshot list.
+    // Prevents stale global snapshots being passed to UK endpoints (and vice versa).
+    const validSnapshot = selectedSnapshot && snapshots.find(s => s.snapshotId === selectedSnapshot)
+      ? selectedSnapshot : null
+    const snapExpr = validSnapshot ? `'${validSnapshot}'` : 'NULL'
+    if (renderMode === 'h3') {
+      const fn = dataset === 'uk' ? 'ICECHUNK_LEVEL_SLICE_H3_UK' : 'ICECHUNK_CLOUD_AT_LEVEL_H3'
+      return dataset === 'uk'
+        ? `SELECT f.value:h3index::VARCHAR AS h3index,
+                  f.value:value::FLOAT     AS value,
+                  f.value:level_value::FLOAT AS level_value,
+                  f.value:level_units::VARCHAR AS level_units,
+                  r.result:total_levels::INTEGER AS total_levels
+           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.${fn}(
+             '${activeVar}', ${level}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}, ${h3Res}
+           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`
+        : `SELECT f.value:h3index::VARCHAR    AS h3index,
+                  f.value:value::FLOAT        AS value,
+                  f.value:height_m::FLOAT     AS level_value,
+                  r.result:total_levels::INTEGER AS total_levels
+           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.${fn}(
+             ${level}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}, ${h3Res}
+           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`
+    } else {
+      // Grid mode
+      const fn = dataset === 'uk' ? 'ICECHUNK_LEVEL_SLICE_UK' : 'ICECHUNK_CLOUD_AT_LEVEL'
+      return dataset === 'uk'
+        ? `SELECT f.value:lat::FLOAT AS lat, f.value:lon::FLOAT AS lon,
+                  f.value:value::FLOAT AS value,
+                  f.value:level_value::FLOAT AS level_value,
+                  f.value:level_units::VARCHAR AS level_units,
+                  r.result:total_levels::INTEGER AS total_levels
+           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.${fn}(
+             '${activeVar}', ${level}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}
+           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`
+        : `SELECT f.value:lat::FLOAT AS lat, f.value:lon::FLOAT AS lon,
+                  f.value:cloud_pct::FLOAT AS cloud_pct,
+                  f.value:height_m::FLOAT AS level_value,
+                  r.result:total_levels::INTEGER AS total_levels
+           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.${fn}(
+             ${level}, ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}
+           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`
+    }
+  }, [activeVar, bbox, selectedSnapshot, snapshots, renderMode, h3Res, dataset])
+
+  // ── Pre-fetch ALL levels for 3D variables ─────────────────────────────────
+  // Fires all N level queries in parallel (up to 8 concurrent).
+  // Grid mode: cache key excludes h3Res (zoom doesn't change grid data).
+  // H3 mode:   cache key includes h3Res (zoom changes cell size).
+  const prefetchAllLevels = useCallback(async () => {
+    if (!varMeta?.is3D || !meta) return
+
+    const gen = ++prefetchGenRef.current
+    setLevelCache(new Map())
+    setLevelsLoaded(0)
+    setLoadingLevels(true)
+    setError(null)
+    let loaded = 0  // local count (avoids stale state closure)
+
+    // Fetch level 0 first to discover total_levels
+    let nLevels = totalLevels
+    try {
+      const rows0 = await sfQuery(buildLevel3dSql(0), QUERY_DB, QUERY_SCHEMA)
+      if (prefetchGenRef.current !== gen) return  // superseded
+      if (rows0.length > 0) {
+        const tl = Number((rows0[0] as Record<string, unknown>).TOTAL_LEVELS ?? (rows0[0] as Record<string, unknown>).total_levels)
+        if (tl > 0) { nLevels = tl; setTotalLevels(tl) }
+        const pts0 = mapRowsToPoints(rows0)
+        if (pts0.length > 0 && pts0[0].height_m != null) setHeightM(pts0[0].height_m)
+        setLevelCache(prev => new Map(prev).set(0, pts0))
+        setLevelsLoaded(1)
+        loaded = 1
+      }
+    } catch { /* level 0 failed */ }
+
+    // Fetch remaining levels in parallel, batched 8 at a time
+    const BATCH = 8
+    for (let start = 1; start < nLevels; start += BATCH) {
+      if (prefetchGenRef.current !== gen) return
+      const batch = Array.from({ length: Math.min(BATCH, nLevels - start) }, (_, i) => start + i)
+      await Promise.all(batch.map(async (lvl) => {
+        try {
+          const rows = await sfQuery(buildLevel3dSql(lvl), QUERY_DB, QUERY_SCHEMA)
+          if (prefetchGenRef.current !== gen) return
+          const pts = mapRowsToPoints(rows)
+          setLevelCache(prev => new Map(prev).set(lvl, pts))
+          setLevelsLoaded(prev => prev + 1)
+          loaded++
+        } catch { /* skip failed levels silently */ }
+      }))
+    }
+
+    setLoadingLevels(false)
+
+    // Surface a helpful error if nothing loaded at all
+    if (prefetchGenRef.current === gen && loaded === 0) {
+      const hint = dataset === 'global' && activeVar === 'cloud_amount_on_height_levels'
+        ? 'Cloud by height requires the cloud snapshot — select it from the Snapshot picker (top-right).'
+        : 'No data found for this variable in the current snapshot.'
+      setError(hint)
+    }
+  }, [varMeta, meta, buildLevel3dSql, mapRowsToPoints, totalLevels, dataset, activeVar])
+
+  // When a 3D variable is active and cache deps change → prefetch all levels
+  // Grid mode: h3Res excluded (zoom doesn't change grid data)
+  // H3 mode:   h3Res included (zoom changes cell size)
+  const level3dCacheKey = varMeta.is3D
+    ? `${dataset}|${activeVar}|${bbox.latMin}|${bbox.latMax}|${bbox.lonMin}|${bbox.lonMax}|${selectedSnapshot}|${renderMode === 'h3' ? h3Res : 'grid'}`
+    : ''
+
+  useEffect(() => {
+    if (varMeta.is3D && meta) {
+      prefetchAllLevels()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [level3dCacheKey, meta])
+
+  // When heightLevel changes on a 3D var, read from cache (instant, no re-fetch)
+  useEffect(() => {
+    if (!varMeta.is3D) return
+    const cached = levelCache.get(heightLevel)
+    if (cached) {
+      setData(cached)
+      if (cached.length > 0) {
+        let mn = cached[0].value, mx = cached[0].value
+        for (const p of cached) { if (p.value < mn) mn = p.value; if (p.value > mx) mx = p.value }
+        setMinVal(mn); setMaxVal(mx)
+        if (cached[0].height_m != null) setHeightM(cached[0].height_m)
+      }
+    }
+  }, [heightLevel, levelCache, varMeta.is3D])
+
+  // ── Fetch weather data (2D variables only — 3D is handled by prefetchAllLevels) ─
   const fetchData = useCallback(async () => {
     if (!varMeta) return
     if (!meta) return
+    if (varMeta.is3D) return  // 3D handled by prefetchAllLevels
     // For UK grid mode use the actual ~2km spacing to estimate cell count;
     // the global estimator uses 10km spacing and underestimates by ~25x.
     const ukGrid = dataset === 'uk' && renderMode === 'points'
@@ -214,7 +381,10 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     setLoading(true)
     try {
       let rows: Record<string, unknown>[]
-      const snapExpr = selectedSnapshot ? `'${selectedSnapshot}'` : 'NULL'
+      // Only use a snapshot if it belongs to the current dataset's snapshot list
+      const validSnap = selectedSnapshot && snapshots.find(s => s.snapshotId === selectedSnapshot)
+        ? selectedSnapshot : null
+      const snapExpr = validSnap ? `'${validSnap}'` : 'NULL'
 
       if (varMeta.is3D && renderMode === 'h3') {
         // 3D level H3 — generic endpoint handles cloud, temp, wind on height OR pressure levels
@@ -302,30 +472,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         )
       }
 
-      const points: WeatherPoint[] = rows.map(r => {
-        // For 3D H3 cloud: value column is raw fraction (0-1); transform ×100 → pct
-        // For 3D scatter cloud: cloud_pct column is already 0-100; transform ×100 → 0-10000
-        //   (auto-ranging handles the display correctly)
-        // For all 2D variables: value column, apply transform
-        const isH3Cloud = varMeta.is3D && renderMode === 'h3'
-        const isUk3D    = varMeta.is3D && dataset === 'uk'
-        const raw = isH3Cloud
-          ? Number(r.VALUE ?? r.value ?? 0)
-          : varMeta.is3D && !isUk3D
-          ? Number(r.CLOUD_PCT ?? r.cloud_pct ?? 0)
-          : Number(r.VALUE ?? r.value ?? 0)
-        const lv = r.LEVEL_VALUE ?? r.level_value ?? r.HEIGHT_M ?? r.height_m
-        const lu = r.LEVEL_UNITS ?? r.level_units
-        return {
-          lat:         Number(r.LAT ?? r.lat),
-          lon:         Number(r.LON ?? r.lon),
-          h3index:     r.H3INDEX != null ? String(r.H3INDEX) : r.h3index != null ? String(r.h3index) : undefined,
-          value:       varMeta.transform(raw),
-          cloud_pct:   r.CLOUD_PCT != null ? Number(r.CLOUD_PCT) : r.cloud_pct != null ? Number(r.cloud_pct) : undefined,
-          height_m:    lv != null ? Number(lv) : undefined,
-          level_units: lu != null ? String(lu) : undefined,
-        }
-      })
+      const points = mapRowsToPoints(rows)
 
       if (points.length > 0) {
         let computedMin = points[0].value
@@ -336,9 +483,6 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         }
         setMinVal(computedMin)
         setMaxVal(computedMax)
-        if (points[0].height_m != null) setHeightM(points[0].height_m)
-        const tl = Number((rows[0] as Record<string, unknown>).TOTAL_LEVELS ?? (rows[0] as Record<string, unknown>).total_levels)
-        if (tl > 0) setTotalLevels(tl)
       }
       setData(points)
     } catch (err) {
@@ -346,7 +490,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     } finally {
       setLoading(false)
     }
-  }, [activeVar, bbox, heightLevel, varMeta, selectedSnapshot, meta, h3Res, renderMode, dataset])
+  }, [activeVar, bbox, varMeta, selectedSnapshot, snapshots, meta, h3Res, renderMode, dataset, mapRowsToPoints])
 
   useEffect(() => { fetchData() }, [fetchData])
 
@@ -390,10 +534,16 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     ? Math.max(1, Math.ceil(Math.sqrt(ukEstimate / TARGET_UK_RAW)))
     : 1
 
-  // Multiply by 1.008 to add ~0.8% overlap so the dark basemap doesn't bleed
-  // through the hairline gaps between adjacent cells.
-  const halfDegLat = (dataset === 'uk' ? 0.0097 * ukStride : 0.045) * 1.008
-  const halfDegLon = (dataset === 'uk' ? 0.0162 * ukStride : 0.045) * 1.008
+  // Multiply by 1.015 (global) / 1.001 (UK) to fill hairline gaps between cells.
+  // Global: WebGL sub-pixel gaps show the dark basemap → need more overlap.
+  // UK: curvilinear cells tile tightly already → minimal overlap avoids white seams.
+  const halfDegLat = (dataset === 'uk' ? 0.0097 * ukStride : 0.045) * (dataset === 'uk' ? 1.001 : 1.015)
+  const halfDegLon = (dataset === 'uk' ? 0.0162 * ukStride : 0.045) * (dataset === 'uk' ? 1.001 : 1.015)
+
+  // Active colour scale — override with named palette if selected
+  const activeColorScale = colorScheme === 'auto'
+    ? varMeta.colorScale
+    : PALETTES[colorScheme as Exclude<PaletteKey, 'auto'>].scale
 
   // Layer selection:
   // - 3D cloud + H3 mode   → H3HexagonLayer (cloud fraction aggregated to H3 cells)
@@ -405,15 +555,16 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         id: 'weather-cloud-h3',
         data,
         getHexagon: d => d.h3index ?? '',
-        getFillColor: d => valueToRgba(d.value, minVal, maxVal, varMeta.colorScale),
+        getFillColor: d => valueToRgba(d.value, minVal, maxVal, activeColorScale),
         getLineColor: [0, 0, 0, 0],
         filled: true,
         extruded: false,
+        coverage: 1.001,
         pickable: true,
         onClick: handleLayerClick,
         opacity,
         updateTriggers: {
-          getFillColor: [minVal, maxVal, activeVar, heightLevel],
+          getFillColor: [minVal, maxVal, activeVar, heightLevel, colorScheme],
           getHexagon:   [h3Res],
         },
       })
@@ -427,13 +578,13 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           [d.lon + halfDegLon, d.lat + halfDegLat],
           [d.lon - halfDegLon, d.lat + halfDegLat],
         ],
-        getFillColor: d => valueToRgba(d.value, minVal, maxVal, varMeta.colorScale),
+        getFillColor: d => valueToRgba(d.value, minVal, maxVal, activeColorScale),
         getLineColor: [0, 0, 0, 0],
         pickable: true,
         onClick: handleLayerClick,
         opacity,
         updateTriggers: {
-          getFillColor: [minVal, maxVal, activeVar, heightLevel],
+          getFillColor: [minVal, maxVal, activeVar, heightLevel, colorScheme],
           getPolygon:   [dataset],
         },
       })
@@ -450,13 +601,13 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           [d.lon + halfDegLon, d.lat + halfDegLat],
           [d.lon - halfDegLon, d.lat + halfDegLat],
         ],
-        getFillColor: d => valueToRgba(d.value, minVal, maxVal, varMeta.colorScale),
+        getFillColor: d => valueToRgba(d.value, minVal, maxVal, activeColorScale),
         getLineColor: [0, 0, 0, 0],
         pickable: true,
         onClick: handleLayerClick,
         opacity,
         updateTriggers: {
-          getFillColor: [minVal, maxVal, activeVar, heightLevel],
+          getFillColor: [minVal, maxVal, activeVar, heightLevel, colorScheme],
           getPolygon:   [dataset],
         },
       })
@@ -466,15 +617,16 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         // h3index is pre-computed by the Python backend in ICECHUNK_SLICE_H3
         // — no client-side h3-js needed, no SQL H3 functions per row
         getHexagon: d => d.h3index ?? '',
-        getFillColor: d => valueToRgba(d.value, minVal, maxVal, varMeta.colorScale),
+        getFillColor: d => valueToRgba(d.value, minVal, maxVal, activeColorScale),
         getLineColor: [0, 0, 0, 0],
         filled: true,
         extruded: false,
+        coverage: 1.001,
         pickable: true,
         onClick: handleLayerClick,
         opacity,
         updateTriggers: {
-          getFillColor: [minVal, maxVal, activeVar, heightLevel],
+          getFillColor: [minVal, maxVal, activeVar, heightLevel, colorScheme],
           getHexagon:   [h3Res],
         },
       })
@@ -713,6 +865,28 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
                 : <><span>Surface (~5m)</span><span>Upper (~40km)</span></>
               }
             </div>
+            {/* Level cache loading progress */}
+            {loadingLevels && (
+              <div style={{ marginTop: 6 }}>
+                <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 3 }}>
+                  Pre-loading levels… {levelsLoaded}/{totalLevels}
+                </div>
+                <div style={{ height: 3, background: 'var(--surface-2)', borderRadius: 2 }}>
+                  <div style={{
+                    height: '100%',
+                    width: `${(levelsLoaded / totalLevels) * 100}%`,
+                    background: 'var(--accent)',
+                    borderRadius: 2,
+                    transition: 'width 0.2s ease',
+                  }} />
+                </div>
+              </div>
+            )}
+            {!loadingLevels && levelCache.size > 0 && (
+              <div style={{ fontSize: 10, color: 'var(--accent)', marginTop: 4 }}>
+                ✓ {levelCache.size} levels cached — slider is instant
+              </div>
+            )}
           </div>
         )}
 
@@ -986,18 +1160,54 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         </div>
       </div>
 
-      {/* ── Colour legend ──────────────────────────────────────── */}
+      {/* ── Colour legend + palette selector ────────────────────── */}
       <div className="map-overlay bottom-right color-legend">
         <div className="overlay-title">
           {varMeta.label}
         </div>
         <div
           className="color-bar"
-          style={{ background: buildGradient(varMeta.colorScale) }}
+          style={{ background: buildGradient(activeColorScale) }}
         />
         <div className="color-labels">
           <span>{formatValue(minVal, activeVar)}</span>
           <span>{formatValue(maxVal, activeVar)}</span>
+        </div>
+        {/* Palette selector */}
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 4 }}>Palette</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+            {(['auto', ...Object.keys(PALETTES)] as PaletteKey[]).map(key => {
+              const scale = key === 'auto' ? varMeta.colorScale : PALETTES[key as Exclude<PaletteKey, 'auto'>].scale
+              const label = key === 'auto' ? 'Auto' : PALETTES[key as Exclude<PaletteKey, 'auto'>].label
+              return (
+                <button
+                  key={key}
+                  title={label}
+                  onClick={() => setColorScheme(key)}
+                  style={{
+                    width: 32,
+                    height: 14,
+                    border: colorScheme === key ? '2px solid var(--accent)' : '2px solid transparent',
+                    borderRadius: 3,
+                    cursor: 'pointer',
+                    padding: 0,
+                    background: buildGradient(scale),
+                  }}
+                />
+              )
+            })}
+          </div>
+          {colorScheme !== 'auto' && (
+            <div style={{ fontSize: 10, color: 'var(--accent)', marginTop: 3 }}>
+              {PALETTES[colorScheme as Exclude<PaletteKey, 'auto'>].label}
+              {' · '}
+              <span
+                style={{ cursor: 'pointer', textDecoration: 'underline' }}
+                onClick={() => setColorScheme('auto')}
+              >reset</span>
+            </div>
+          )}
         </div>
       </div>
     </div>
