@@ -1,0 +1,336 @@
+<mxfile host="app.diagrams.net" modified="2026-06-05" version="21.0.0">
+  <diagram name="IceChunk Architecture" id="icechunk-arch">
+    <mxGraphModel dx="1400" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- TITLE                                                   -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <mxCell id="title" value="IceChunk Accelerator — Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=22;fontStyle=1;fontColor=#1A1A2E;" vertex="1" parent="1">
+          <mxGeometry x="400" y="20" width="820" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- USER / BROWSER                                          -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <mxCell id="browser-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="440" width="160" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="browser-icon" value="🌐" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=28;" vertex="1" parent="1">
+          <mxGeometry x="60" y="444" width="60" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="browser-label" value="&lt;b&gt;User&lt;/b&gt;&lt;br&gt;Browser" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="118" y="452" width="96" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="browser-url" value="https://b2a42cpb-sfsehol-…" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=9;fontColor=#888888;" vertex="1" parent="1">
+          <mxGeometry x="50" y="522" width="180" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- SNOWFLAKE BOUNDARY                                      -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <mxCell id="sf-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#29B5E8;strokeWidth=3;arcSize=3;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="280" y="80" width="900" height="820" as="geometry" />
+        </mxCell>
+        <mxCell id="sf-label" value="&lt;b&gt;Snowflake&lt;/b&gt;  (SFSEHOL-INTERNAL_MARKETPLACE)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=15;fontColor=#0072B8;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="296" y="90" width="540" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="sf-logo" value="❄️" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=22;" vertex="1" parent="1">
+          <mxGeometry x="850" y="88" width="40" height="32" as="geometry" />
+        </mxCell>
+
+        <!-- ── SPCS Compute Pool ─────────────────────────────────── -->
+        <mxCell id="pool-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F4FD;strokeColor=#29B5E8;strokeWidth=2;arcSize=4;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="310" y="130" width="840" height="380" as="geometry" />
+        </mxCell>
+        <mxCell id="pool-label" value="&lt;b&gt;SPCS Compute Pool&lt;/b&gt;  ICECHUNK_COMPUTE_POOL  (CPU_X64_S)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=12;fontColor=#29B5E8;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="326" y="138" width="500" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Frontend container -->
+        <mxCell id="fe-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#29B5E8;strokeWidth=2;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="330" y="170" width="340" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="fe-title" value="&lt;b&gt;icechunk-accelerator&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=13;fontColor=#1A1A2E;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="330" y="176" width="340" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="fe-sub" value="React + Express  ·  port 3001  ·  v1.0.59" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=10;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="330" y="196" width="340" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="fe-divider" value="" style="endArrow=none;html=1;strokeColor=#29B5E8;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry x="336" y="218" width="328" height="2" relative="1" as="geometry">
+            <mxPoint x="336" y="218" as="sourcePoint" />
+            <mxPoint x="664" y="218" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="fe-item1" value="🗺  DeckGL weather map (React)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="346" y="226" width="310" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="fe-item2" value="📊  Table Analysis panel" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="346" y="248" width="310" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="fe-item3" value="🤖  Cortex Agent chat (SSE)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="346" y="270" width="310" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="fe-item4" value="🔁  /api/direct/slice_uk  (proxy → backend)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="346" y="292" width="310" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="fe-item5" value="💾  /api/save-table  (SF SQL REST proxy)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="346" y="314" width="310" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="fe-item6" value="🗂  /api/query  (SELECT / SHOW proxy)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="346" y="336" width="310" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="fe-eai" value="EAI: FLEET_INTEL_MAP_TILES_EAI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="346" y="420" width="310" height="26" as="geometry" />
+        </mxCell>
+
+        <!-- Backend container -->
+        <mxCell id="be-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#0072B8;strokeWidth=2;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="710" y="170" width="420" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="be-title" value="&lt;b&gt;icechunk-service&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=13;fontColor=#1A1A2E;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="710" y="176" width="420" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="be-sub" value="FastAPI (Python)  ·  port 8080  ·  v1.0.46" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=10;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="710" y="196" width="420" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="be-divider" value="" style="endArrow=none;html=1;strokeColor=#0072B8;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry x="716" y="218" width="408" height="2" relative="1" as="geometry">
+            <mxPoint x="716" y="218" as="sourcePoint" />
+            <mxPoint x="1124" y="218" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="be-item1" value="POST  /slice          → global 2D slice" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontFamily=Courier New;" vertex="1" parent="1">
+          <mxGeometry x="726" y="226" width="390" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="be-item2" value="POST  /slice_uk       → UK 2D slice (SF ext fn)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontFamily=Courier New;" vertex="1" parent="1">
+          <mxGeometry x="726" y="248" width="390" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="be-item3" value="POST  /slice_h3       → H3 aggregated slice" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontFamily=Courier New;" vertex="1" parent="1">
+          <mxGeometry x="726" y="270" width="390" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="be-item4" value="POST  /direct/slice_uk → UK 2D (direct, no SF)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontFamily=Courier New;fontStyle=1;fontColor=#0072B8;" vertex="1" parent="1">
+          <mxGeometry x="726" y="292" width="390" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="be-item5" value="POST  /level_slice_uk → UK 3D at level" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontFamily=Courier New;" vertex="1" parent="1">
+          <mxGeometry x="726" y="314" width="390" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="be-item6" value="GET   /meta            → variables, grid, snaps" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontFamily=Courier New;" vertex="1" parent="1">
+          <mxGeometry x="726" y="336" width="390" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="be-item7" value="IceChunk Python library  ·  numpy  ·  zarr" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="726" y="358" width="390" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="be-eai" value="EAI: ICECHUNK_S3_EAI + MET_OFFICE_ASDI_EAI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=center;" vertex="1" parent="1">
+          <mxGeometry x="726" y="420" width="390" height="26" as="geometry" />
+        </mxCell>
+
+        <!-- ── Snowflake SQL layer ─────────────────────────────── -->
+        <mxCell id="sql-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F4FD;strokeColor=#29B5E8;strokeWidth=1;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="310" y="540" width="840" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="sql-label" value="&lt;b&gt;Snowflake SQL Layer&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=12;fontColor=#0072B8;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="326" y="548" width="300" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- External Functions box -->
+        <mxCell id="extfn-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#0072B8;strokeWidth=1;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="326" y="572" width="360" height="148" as="geometry" />
+        </mxCell>
+        <mxCell id="extfn-title" value="&lt;b&gt;External Functions&lt;/b&gt;  (ICECHUNK_DB.ICECHUNK)" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=11;fontColor=#0072B8;" vertex="1" parent="1">
+          <mxGeometry x="326" y="578" width="360" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="extfn-1" value="ICECHUNK_SLICE" style="text;html=1;strokeColor=none;fillColor=#EBF5FB;align=left;fontSize=10;fontFamily=Courier New;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="336" y="602" width="160" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="extfn-2" value="ICECHUNK_SLICE_UK" style="text;html=1;strokeColor=none;fillColor=#EBF5FB;align=left;fontSize=10;fontFamily=Courier New;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="336" y="630" width="160" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="extfn-3" value="ICECHUNK_SLICE_H3" style="text;html=1;strokeColor=none;fillColor=#EBF5FB;align=left;fontSize=10;fontFamily=Courier New;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="336" y="658" width="160" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="extfn-4" value="ICECHUNK_LEVEL_SLICE_UK" style="text;html=1;strokeColor=none;fillColor=#EBF5FB;align=left;fontSize=10;fontFamily=Courier New;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="510" y="602" width="168" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="extfn-5" value="ICECHUNK_META" style="text;html=1;strokeColor=none;fillColor=#EBF5FB;align=left;fontSize=10;fontFamily=Courier New;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="510" y="630" width="168" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="extfn-arrow" value="→ routes to icechunk-service" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=9;fontColor=#888888;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="336" y="688" width="342" height="18" as="geometry" />
+        </mxCell>
+
+        <!-- Warehouse + Tables -->
+        <mxCell id="wh-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#0072B8;strokeWidth=1;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="714" y="572" width="418" height="148" as="geometry" />
+        </mxCell>
+        <mxCell id="wh-title" value="&lt;b&gt;Warehouse + Storage&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=11;fontColor=#0072B8;" vertex="1" parent="1">
+          <mxGeometry x="714" y="578" width="418" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="wh-item" value="⚙  XSMALL warehouse  (executes external functions)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="724" y="602" width="400" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="wh-table1" value="🗃  WEATHER_* tables  (saved slices — Snowflake storage)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="724" y="630" width="400" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="wh-table2" value="       lat · lon · h3_cell · variable · value · snapshot_id" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;fontColor=#888888;fontFamily=Courier New;" vertex="1" parent="1">
+          <mxGeometry x="724" y="652" width="400" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="wh-cortex" value="🤖  Cortex Agent  (natural language → SQL over WEATHER_*)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="724" y="676" width="400" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- AWS BOUNDARY                                            -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <mxCell id="aws-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FEF9E7;strokeColor=#FF9900;strokeWidth=3;arcSize=3;opacity=40;" vertex="1" parent="1">
+          <mxGeometry x="1230" y="80" width="380" height="580" as="geometry" />
+        </mxCell>
+        <mxCell id="aws-label" value="&lt;b&gt;AWS  (S3)&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=15;fontColor=#FF9900;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1246" y="90" width="200" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- UK Store -->
+        <mxCell id="uk-store" value="&lt;b&gt;IceChunk UK 2km Store&lt;/b&gt;&lt;br&gt;s3://&lt;your-bucket&gt;/uk/&lt;br&gt;&lt;br&gt;• Zarr chunk files (content-addressed)&lt;br&gt;• IceChunk snapshot manifests&lt;br&gt;• Variables seeded via DataLoader:&lt;br&gt;  wind_speed, rainfall, visibility&lt;br&gt;  cloud amounts, snowfall, …&lt;br&gt;&lt;br&gt;~TB scale" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFDE7;strokeColor=#FF9900;strokeWidth=2;arcSize=6;fontSize=11;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1250" y="130" width="340" height="230" as="geometry" />
+        </mxCell>
+
+        <!-- Global Store -->
+        <mxCell id="global-store" value="&lt;b&gt;Met Office ASDI Global 10km&lt;/b&gt;&lt;br&gt;s3://met-office-atmospheric-model-data/&lt;br&gt;&lt;i&gt;(public AWS Open Data bucket)&lt;/i&gt;&lt;br&gt;&lt;br&gt;• Global NWP Zarr/IceChunk store&lt;br&gt;• All surface variables&lt;br&gt;• Read-only (not your bucket)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFDE7;strokeColor=#FF9900;strokeWidth=2;arcSize=6;fontSize=11;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1250" y="390" width="340" height="190" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- ARROWS / FLOWS                                          -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+
+        <!-- Browser → Frontend (HTTPS public ingress) -->
+        <mxCell id="arr-browser-fe" value="HTTPS&lt;br&gt;(public ingress)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#29B5E8;strokeWidth=2;fillColor=#29B5E8;fontColor=#0072B8;fontSize=10;align=center;" edge="1" parent="1" source="browser-bg" target="fe-bg">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Frontend → Backend (direct: SPCS internal) -->
+        <mxCell id="arr-fe-be-direct" value="HTTP (SPCS internal)&lt;br&gt;/direct/slice_uk&lt;br&gt;&lt;b&gt;visualise path&lt;/b&gt;" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#0072B8;strokeWidth=2;fillColor=#0072B8;fontColor=#0072B8;fontSize=10;align=center;dashed=0;" edge="1" parent="1" source="fe-bg" target="be-bg">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="500" y="320" />
+              <mxPoint x="920" y="320" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Frontend → SF SQL REST (save-to-table) -->
+        <mxCell id="arr-fe-sql" value="SF SQL REST API&lt;br&gt;CREATE TABLE AS SELECT …&lt;br&gt;&lt;b&gt;save-to-table path&lt;/b&gt;" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9B59B6;strokeWidth=2;fillColor=#9B59B6;fontColor=#9B59B6;fontSize=10;align=center;" edge="1" parent="1" source="fe-bg" target="extfn-bg">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="500" y="530" />
+              <mxPoint x="506" y="646" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Ext Functions → Backend (HTTP via SF ext fn mechanism) -->
+        <mxCell id="arr-extfn-be" value="HTTP callback&lt;br&gt;(ext fn → service)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9B59B6;strokeWidth=2;fillColor=#9B59B6;fontColor=#9B59B6;fontSize=10;align=center;" edge="1" parent="1" source="extfn-bg" target="be-bg">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="506" y="640" />
+              <mxPoint x="920" y="640" />
+              <mxPoint x="920" y="470" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Ext Functions → WEATHER tables (CREATE TABLE AS SELECT result) -->
+        <mxCell id="arr-extfn-tables" value="rows written" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9B59B6;strokeWidth=1;fillColor=#9B59B6;fontColor=#9B59B6;fontSize=10;align=center;dashed=1;" edge="1" parent="1" source="extfn-bg" target="wh-bg">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Backend → UK S3 -->
+        <mxCell id="arr-be-uk" value="HTTP range requests&lt;br&gt;(IceChunk chunk reads)&lt;br&gt;via MET_OFFICE_ASDI_EAI" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#FF9900;strokeWidth=2;fillColor=#FF9900;fontColor=#E67E22;fontSize=10;align=center;" edge="1" parent="1" source="be-bg" target="uk-store">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1130" y="245" />
+              <mxPoint x="1420" y="245" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Backend → Global S3 -->
+        <mxCell id="arr-be-global" value="HTTP range requests&lt;br&gt;via ICECHUNK_S3_EAI" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#FF9900;strokeWidth=2;fillColor=#FF9900;fontColor=#E67E22;fontSize=10;align=center;" edge="1" parent="1" source="be-bg" target="global-store">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1130" y="400" />
+              <mxPoint x="1420" y="485" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- LEGEND                                                  -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <mxCell id="legend-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDFEFE;strokeColor=#CCCCCC;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="60" y="120" width="200" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-title" value="&lt;b&gt;Data Flows&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="128" width="200" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg1-line" value="" style="endArrow=block;html=1;strokeColor=#29B5E8;strokeWidth=3;fillColor=#29B5E8;" edge="1" parent="1">
+          <mxGeometry x="76" y="162" relative="1" as="geometry">
+            <mxPoint x="76" y="162" as="sourcePoint" />
+            <mxPoint x="136" y="162" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="leg1-label" value="Browser ↔ SPCS" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="142" y="152" width="110" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg2-line" value="" style="endArrow=block;html=1;strokeColor=#0072B8;strokeWidth=3;fillColor=#0072B8;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="76" y="192" as="sourcePoint" />
+            <mxPoint x="136" y="192" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="leg2-label" value="Direct visualise path&lt;br&gt;(no SF 20 MB limit)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="142" y="182" width="110" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg3-line" value="" style="endArrow=block;html=1;strokeColor=#9B59B6;strokeWidth=3;fillColor=#9B59B6;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="76" y="232" as="sourcePoint" />
+            <mxPoint x="136" y="232" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="leg3-label" value="Save-to-table path&lt;br&gt;(via SF ext functions)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="142" y="222" width="110" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg4-line" value="" style="endArrow=block;html=1;strokeColor=#FF9900;strokeWidth=3;fillColor=#FF9900;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="76" y="272" as="sourcePoint" />
+            <mxPoint x="136" y="272" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="leg4-label" value="SPCS → AWS S3&lt;br&gt;(IceChunk reads, EAI)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="142" y="262" width="110" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg-note" value="Data never moves to&lt;br&gt;Snowflake storage&lt;br&gt;(except saved WEATHER_* tables)" style="text;html=1;strokeColor=none;fillColor=#FFF3CD;align=center;fontSize=10;rounded=1;strokeColor=#FFCC00;" vertex="1" parent="1">
+          <mxGeometry x="72" y="316" width="180" height="54" as="geometry" />
+        </mxCell>
+
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <!-- VERSION BADGE                                           -->
+        <!-- ═══════════════════════════════════════════════════════ -->
+        <mxCell id="version" value="icechunk-service v1.0.46  ·  icechunk-accelerator v1.0.59" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=10;fontColor=#888888;" vertex="1" parent="1">
+          <mxGeometry x="400" y="920" width="800" height="20" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
