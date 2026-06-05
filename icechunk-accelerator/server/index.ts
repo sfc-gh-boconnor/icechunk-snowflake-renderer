@@ -100,15 +100,16 @@ async function snowSqlSpcs(
       'User-Agent': 'icechunk-accelerator/1.0',
     }
 
+    type PartitionResult = { cols: string[]; rows: unknown[]; handle?: string; partitions: number; status: number }
+
     /**
-     * Fetch a single partition.
-     * `knownCols` must be supplied for partition GETs (index >= 1) because
-     * Snowflake omits resultSetMetaData from all but the first response.
+     * Fetch a single partition (POST for initial statement, GET for partitions/polls).
+     * Returns HTTP status so callers can detect 202 async execution.
      */
     function fetchPartition(
       path: string,
       knownCols?: string[]
-    ): Promise<{ cols: string[]; rows: unknown[] }> {
+    ): Promise<PartitionResult> {
       return new Promise((res, rej) => {
         const method = path === '/api/v2/statements' ? 'POST' : 'GET'
         const opts = { hostname: host, path, method, headers: baseHeaders }
@@ -118,11 +119,13 @@ async function snowSqlSpcs(
           httpRes.on('end', () => {
             const raw = Buffer.concat(chunks)
             const encoding = httpRes.headers['content-encoding']
+            const httpStatus = httpRes.statusCode ?? 200
 
             const parseResponse = (text: string) => {
               try {
-                if (httpRes.statusCode && (httpRes.statusCode < 200 || httpRes.statusCode >= 300)) {
-                  rej(new Error(`SF API HTTP ${httpRes.statusCode}: ${text.slice(0, 200)}`))
+                // Reject hard HTTP errors; 202 (async executing) is NOT an error here
+                if (httpStatus < 200 || (httpStatus >= 300 && httpStatus !== 202)) {
+                  rej(new Error(`SF API HTTP ${httpStatus}: ${text.slice(0, 200)}`))
                   return
                 }
                 const json = JSON.parse(text)
@@ -139,9 +142,7 @@ async function snowSqlSpcs(
                   cols.forEach((c, i) => { obj[c] = row[i] })
                   return obj
                 })
-                ;(res as unknown as (v: { cols: string[]; rows: unknown[]; handle?: string; partitions?: number }) => void)(
-                  { cols, rows, handle: json.statementHandle, partitions: json.resultSetMetaData?.partitionInfo?.length ?? 1 }
-                )
+                res({ cols, rows, handle: json.statementHandle, partitions: json.resultSetMetaData?.partitionInfo?.length ?? 1, status: httpStatus })
               } catch {
                 rej(new Error(`SF API parse error: ${text.slice(0, 400)}`))
               }
@@ -166,10 +167,29 @@ async function snowSqlSpcs(
     // Initial POST
     fetchPartition('/api/v2/statements')
       .then(async (first) => {
-        const { cols, rows: firstRows, handle, partitions } = first as {
-          cols: string[]; rows: unknown[]; handle?: string; partitions?: number
+        let current: PartitionResult = first
+
+        // Handle Snowflake async execution (HTTP 202): poll until the statement
+        // completes. This happens when CREATE TABLE AS SELECT takes > timeout
+        // seconds. Without polling, the code would proceed immediately and the
+        // subsequent COUNT(*) query would fail with "Object does not exist".
+        if (current.status === 202 && current.handle) {
+          console.log(`SF API: statement executing async, polling handle=${current.handle.slice(0, 12)}…`)
+          const MAX_POLLS = 90  // 90 × 2 s = 3 minutes
+          for (let i = 0; i < MAX_POLLS; i++) {
+            await new Promise(r => setTimeout(r, 2000))
+            current = await fetchPartition(`/api/v2/statements/${current.handle}`, current.cols)
+            console.log(`SF API: poll ${i + 1}/${MAX_POLLS} status=${current.status}`)
+            if (current.status !== 202) break
+          }
+          if (current.status === 202) {
+            reject(new Error('SF API: statement still executing after 3 minutes'))
+            return
+          }
         }
-        console.log(`SF API: ${partitions ?? 1} partition(s), handle=${handle?.slice(0, 12) ?? 'none'}`)
+
+        const { cols, rows: firstRows, handle, partitions } = current
+        console.log(`SF API: ${partitions} partition(s), handle=${handle?.slice(0, 12) ?? 'none'}`)
 
         if (!handle || !partitions || partitions <= 1) {
           resolve(firstRows)
@@ -181,7 +201,7 @@ async function snowSqlSpcs(
         // For N partitions this reduces latency from N×T to ~1×T.
         const partitionPromises = Array.from(
           { length: partitions - 1 },
-          (_, i) => fetchPartition(`/api/v2/statements/${handle}?partition=${i + 1}`, cols) as Promise<{ cols: string[]; rows: unknown[] }>
+          (_, i) => fetchPartition(`/api/v2/statements/${handle}?partition=${i + 1}`, cols)
         )
         const remaining = await Promise.all(partitionPromises)
         const allRows: unknown[] = [...firstRows]
