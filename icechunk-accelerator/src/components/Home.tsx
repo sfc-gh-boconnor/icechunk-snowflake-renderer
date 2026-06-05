@@ -64,7 +64,7 @@ export default function Home({ onNavigate }: { onNavigate: (tab: string) => void
               </div>
               <div className="metric-card">
                 <div className="metric-value">
-                  {(meta.grid.lat_count * meta.grid.lon_count / 1e6).toFixed(1)}M
+                  {((meta.grid.lat_count ?? meta.grid.nrows ?? 0) * (meta.grid.lon_count ?? meta.grid.ncols ?? 0) / 1e6).toFixed(1)}M
                 </div>
                 <div className="metric-label">Grid Points</div>
               </div>

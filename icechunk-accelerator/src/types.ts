@@ -17,8 +17,10 @@ export interface MetaResult {
   variables: string[]
   snapshots?: Array<{ tag: string; label: string; snapshotId: string }>
   grid: {
-    lat_count: number
-    lon_count: number
+    lat_count?: number   // global meta field name
+    lon_count?: number   // global meta field name
+    nrows?: number       // UK meta field name
+    ncols?: number       // UK meta field name
     lat_range: number[]
     lon_range: number[]
   }

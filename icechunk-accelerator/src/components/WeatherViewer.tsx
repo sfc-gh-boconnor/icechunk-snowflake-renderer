@@ -429,10 +429,10 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     // the global estimator uses 10km spacing and underestimates by ~25x.
     const ukGrid = dataset === 'uk' && renderMode === 'points'
     const latStepLocal = meta?.grid
-      ? (meta.grid.lat_range[1] - meta.grid.lat_range[0]) / (meta.grid.lat_count - 1)
+      ? (meta.grid.lat_range[1] - meta.grid.lat_range[0]) / ((meta.grid.lat_count ?? (meta.grid as {nrows?: number}).nrows ?? 970) - 1)
       : (dataset === 'uk' ? 0.019 : 0.09)
     const lonStepLocal = meta?.grid
-      ? (meta.grid.lon_range[1] - meta.grid.lon_range[0]) / (meta.grid.lon_count - 1)
+      ? (meta.grid.lon_range[1] - meta.grid.lon_range[0]) / ((meta.grid.lon_count ?? (meta.grid as {ncols?: number}).ncols ?? 1042) - 1)
       : (dataset === 'uk' ? 0.032 : 0.09)
     const cellCount = ukGrid
       ? Math.ceil((bbox.latMax - bbox.latMin) / latStepLocal) *
@@ -628,10 +628,10 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   // Grid step is derived from metadata (lat_count, lon_count, lat_range, lon_range).
   // Falls back to known dataset defaults while meta is still loading.
   const latStep = meta?.grid
-    ? (meta.grid.lat_range[1] - meta.grid.lat_range[0]) / (meta.grid.lat_count - 1)
+    ? (meta.grid.lat_range[1] - meta.grid.lat_range[0]) / ((meta.grid.lat_count ?? (meta.grid as {nrows?: number}).nrows ?? 970) - 1)
     : (dataset === 'uk' ? 0.019 : 0.09)
   const lonStep = meta?.grid
-    ? (meta.grid.lon_range[1] - meta.grid.lon_range[0]) / (meta.grid.lon_count - 1)
+    ? (meta.grid.lon_range[1] - meta.grid.lon_range[0]) / ((meta.grid.lon_count ?? (meta.grid as {ncols?: number}).ncols ?? 1042) - 1)
     : (dataset === 'uk' ? 0.032 : 0.09)
 
   // Auto-stride: backend subsamples the UK grid to keep under the target count.
