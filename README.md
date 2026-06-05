@@ -117,7 +117,7 @@ Met Office forecast data is stored as a versioned IceChunk Zarr store on S3 and 
 
 | Dataset | Resolution | Grid | Source |
 |---------|-----------|------|--------|
-| Global Deterministic 10km | ~10km / 0.09° | 1920 × 2560 | Met Office ASDI |
+| Global Deterministic 10km | ~10km / ~0.09° (step from metadata) | 1920 × 2560 | Met Office ASDI |
 | UK Deterministic 2km | ~2km | 970 × 1042 | Met Office ASDI |
 
 ### Global 10km variables
@@ -170,11 +170,12 @@ For 3D level queries, level_idx selects the height (metres) or pressure (Pa) sli
 |------|---------|
 | `server/index.ts` | Express: Snowflake REST API proxy (parallel partitions), CARTO tile proxy, Cortex Agent SSE proxy, ingest endpoints |
 | `src/App.tsx` | Root: agentFocusBbox state, wires AgentChat ↔ WeatherViewer |
-| `src/components/WeatherViewer.tsx` | DeckGL map: H3/Grid toggle, dataset/variable/snapshot/bbox/level controls |
+| `src/components/WeatherViewer.tsx` | DeckGL map: H3/Grid toggle, dataset/variable/snapshot/bbox/level controls, palette selector |
 | `src/components/AgentChat.tsx` | SSE streaming chat; fires onMapFocus(bbox) on tool results |
 | `src/components/DataLoader.tsx` | Global + UK ingest UI with per-variable selection |
 | `src/components/Home.tsx` | Home/landing screen |
 | `src/types.ts` | VARIABLES (surface + 3D), UK_INGEST_FILES, BBOX_PRESETS, DatasetConfig |
+| `src/shared/format.ts` | `PALETTES` (9 named colour schemes), value formatters |
 
 ---
 
@@ -226,6 +227,27 @@ All functions return VARIANT. Use `LATERAL FLATTEN(input => result:data)` to exp
 | CARTO basemap CDN | Dark map tile background (`dark_all` style) | None (free CDN) |
 | Snowflake REST API v2 | SQL query execution from Express | SPCS service identity token |
 | Cortex Agent API | Natural-language weather Q&A | SPCS service identity token |
+
+---
+
+## Colour Palette Selector
+
+Nine named palettes available in the viewer below the legend:
+`viridis`, `plasma`, `magma`, `inferno`, `coolwarm`, `rdbu`, `spectral`, `rainbow`, `greys`.
+Selecting one overrides the variable-specific default colour scale. `auto` restores the default.
+Palettes are defined in `src/shared/format.ts` as `PALETTES: Record<PaletteKey, Palette>`.
+
+---
+
+## Grid Cell Sizing
+
+SolidPolygonLayer cell extents are derived from `meta.grid` at render time:
+```
+latStep = (lat_range[1] - lat_range[0]) / (lat_count - 1)
+lonStep = (lon_range[1] - lon_range[0]) / (lon_count - 1)
+halfDegLat = (latStep / 2) * ukStride * overlap   // overlap = 1.015 global, 1.001 UK
+```
+This is the same formula for both datasets. Falls back to 0.09° (global) / 0.019° lat (UK) only while metadata is loading on first render.
 
 ---
 

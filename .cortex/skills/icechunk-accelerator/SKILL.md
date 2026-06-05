@@ -293,9 +293,11 @@ All functions return VARIANT. Use `LATERAL FLATTEN(input => result:data)` to exp
 | No files downloaded for run stamp | ASDI lags 6-12 h | Backend auto-falls back up to 6 hours |
 | Only 6 data points visible | Old synthetic data in latest snapshot | Run `ICECHUNK_SEED()` to overwrite |
 | Agent returns 0 chars | Hardcoded model not available | Set `models: orchestration: auto` in `05_create_agent.sql` |
-| Agent tool fails with Cortex permission error | ICECHUNK_DB lacks CORTEX_USER | `GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE ICECHUNK_DB;` |
+| `ICECHUNK_DB` lacks `CORTEX_USER` | Agent tool fails with Cortex permission error | `GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE ICECHUNK_DB;` |
 | EAI dropped after spec update | ALTER FROM SPECIFICATION resets EAIs | Re-run `ALTER SERVICE SET EXTERNAL_ACCESS_INTEGRATIONS` |
 | UK 3D var not found in repo | 3D var not ingested (large files, opt-in) | Use DataLoader UK tab or `ICECHUNK_SEED_UK_VARS(json)` |
+| Global cloud shows nothing after selecting var | `cloud_amount_on_height_levels` is in a separate snapshot | Select the `met_office_cloud_*` snapshot from the top-right Snapshot picker |
+| Global grid cells wrong size | Old hardcoded 0.09° — fixed in v1.0.43 | Redeploy; grid step now from `meta.grid.lat_count` / `lat_range` |
 | Partition rows empty | Missing `knownCols` in partition GET | `fetchPartition()` in `server/index.ts` must pass column metadata |
 | h5py pip install fails | Missing HDF5 libraries | Add `libhdf5-dev pkg-config` to Dockerfile apt install |
 
@@ -313,7 +315,7 @@ scripts/
 
 Project root (not in skill):
   build.sh                  Docker buildx wrapper with --bump patch versioning
-  VERSION                   Semver file (1.0.38) updated by build.sh
+  VERSION                   Semver file (1.0.43) updated by build.sh
   Dockerfile                Python FastAPI backend (icechunk-service)
   icechunk-accelerator/     React/Vite/Express frontend (icechunk-accelerator)
   app/                      Python FastAPI source:

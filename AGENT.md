@@ -73,7 +73,7 @@ Browser
 | `icechunk-accelerator/src/components/DataLoader.tsx` | Global + UK ingest UI with per-variable checkbox selection |
 | `icechunk-accelerator/src/types.ts` | VARIABLES (all surface + 3D), UK_INGEST_FILES, BBOX_PRESETS |
 | `build.sh` | `bash build.sh --bump patch` — builds both images |
-| `VERSION` | Semver (current: 1.0.38) |
+| `VERSION` | Semver (current: 1.0.43) |
 | `.cortex/skills/icechunk-accelerator/scripts/05_create_agent.sql` | WEATHER_AGENT + 3 tool procedures + grants |
 
 ---
@@ -98,8 +98,8 @@ Browser
 
 ```
 sfsehol-internal-marketplace.registry.snowflakecomputing.com/icechunk_db/icechunk/icechunk_repo/
-  icechunk-service:latest      (+ pinned :1.0.38)
-  icechunk-accelerator:latest  (+ pinned :1.0.38)
+  icechunk-service:latest      (+ pinned :1.0.43)
+  icechunk-accelerator:latest  (+ pinned :1.0.43)
 ```
 
 ---
@@ -134,6 +134,19 @@ The `LEVEL_COORD_MAP` in `main.py` maps each 3D variable to its zarr coordinate 
 - `temperature_on_height_levels` → `height_levels` (m)
 - `temperature_on_pressure_levels` → `pressure_levels` (Pa)
 - etc.
+
+**Level cache:** All N levels are pre-fetched in parallel (batches of 8) when a 3D variable is selected. The level slider reads from an in-memory `Map<levelIdx, WeatherPoint[]>` — no per-level re-fetch on slider movement.
+
+**Global cloud requires snapshot:** `cloud_amount_on_height_levels` on the global dataset is stored in a separate IceChunk snapshot tagged `met_office_cloud_*`. Users must select this snapshot from the top-right picker before the data will appear.
+
+---
+
+## Colour Palette Selector
+
+9 named palettes defined in `src/shared/format.ts` as `PALETTES: Record<PaletteKey, Palette>`:
+`viridis`, `plasma`, `magma`, `inferno`, `coolwarm`, `rdbu`, `spectral`, `rainbow`, `greys`.
+
+`colorScheme` state in `WeatherViewer.tsx` defaults to `'auto'` (uses `varMeta.colorScale`). When a named palette is selected, `activeColorScale = PALETTES[colorScheme].scale` overrides the variable default. Palette swatches rendered below the legend.
 
 ---
 
@@ -216,9 +229,13 @@ snow sql -c internal-marketplace -f .cortex/skills/icechunk-accelerator/scripts/
 
 9. **`ICECHUNK_DB` role needs `CORTEX_USER`** for agent and tool procedures to call AI_COMPLETE.
 
-10. **Global variable dropdown uses `VARIABLES` list from `types.ts`** (not `meta.variables`). The meta endpoint only reads the main branch which may not include 3D vars from a different snapshot.
+10. **Global variable dropdown is filtered**: `VARIABLES.filter(v => !v.is3D || v.key === 'cloud_amount_on_height_levels')`. UK-only 3D pressure/height vars do NOT appear in the global dropdown — they have no data in the global repo.
 
 11. **UK 3D variables route through `ICECHUNK_LEVEL_SLICE_H3_UK`** (generic), not the cloud-specific endpoints. `LEVEL_COORD_MAP` in `main.py` maps variable → coordinate array.
+
+12. **Grid cell size is derived from `meta.grid`, never hardcoded.** Formula: `latStep = (lat_range[1] - lat_range[0]) / (lat_count - 1)`, `halfDegLat = (latStep / 2) * stride * overlap`. Falls back to 0.09° (global) / 0.019° lat (UK) only while meta is loading.
+
+13. **Snapshot cross-dataset guard**: `validSnapshot = selectedSnapshot && snapshots.find(s => s.snapshotId === selectedSnapshot) ? selectedSnapshot : null`. Prevents passing a stale global snapshot ID to UK endpoints on dataset switch.
 
 ---
 
