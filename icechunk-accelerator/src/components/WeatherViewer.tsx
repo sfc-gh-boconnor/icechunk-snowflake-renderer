@@ -117,10 +117,21 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
 
   // Effective variable list:
   // - UK: uses UK_VARIABLES (surface + 3D height/pressure level vars)
-  // - Global: all surface VARIABLES + cloud_amount_on_height_levels (the only 3D var
-  //   in the global 10km repo). Pressure/height-level vars are UK-only and excluded.
+  // Effective variable list:
+  // - UK: filter UK_VARIABLES to those actually present in meta.variables
+  //   (reflects what has been seeded). 3D vars are always kept since they may
+  //   live in a snapshot that meta (main branch) doesn't enumerate.
+  //   Falls back to showing all UK_VARIABLES while meta is still loading.
+  // - Global: surface VARIABLES + cloud_amount_on_height_levels only.
   const availableVars = dataset === 'uk'
-    ? UK_VARIABLES.map(k => resolveVariableMeta(k))
+    ? UK_VARIABLES
+        .filter(k => {
+          const vm = resolveVariableMeta(k)
+          if (vm.is3D) return true  // 3D vars always shown (may be in a snapshot)
+          if (!meta?.variables?.length) return true  // meta not loaded yet — show all
+          return meta.variables.includes(k)
+        })
+        .map(k => resolveVariableMeta(k))
     : VARIABLES.filter(v =>
         v.key !== 'visibility_at_screen_level' &&
         (!v.is3D || v.key === 'cloud_amount_on_height_levels')
@@ -173,6 +184,28 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   }, [bbox, selectedSnapshot])
 
   // ── Load repo metadata and available snapshots on mount / dataset change ────
+  // ── Reload metadata + snapshots (callable from UI after seeding) ─────────────
+  const reloadMeta = useCallback(async () => {
+    const metaSql = dataset === 'uk'
+      ? `SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_META_UK() AS result`
+      : `SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_META() AS result`
+    try {
+      const rows = await sfQuery(metaSql, QUERY_DB, QUERY_SCHEMA)
+      if (rows.length > 0) {
+        const raw = rows[0].RESULT ?? rows[0].result
+        setMeta(typeof raw === 'string' ? JSON.parse(raw) : raw as MetaResult)
+      }
+    } catch { /* non-critical */ }
+    try {
+      const endpoint = dataset === 'uk' ? '/api/snapshots?dataset=uk' : '/api/snapshots'
+      const res = await fetch(endpoint)
+      if (res.ok) {
+        const body = await res.json() as { snapshots: Array<{ tag: string; label: string; snapshotId: string }> }
+        setSnapshots(body.snapshots ?? [])
+      }
+    } catch { /* non-critical */ }
+  }, [dataset])
+
   useEffect(() => {
     const metaSql = dataset === 'uk'
       ? `SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_META_UK() AS result`
@@ -1010,19 +1043,29 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
 
           {snapshots.length > 0 ? (
             <>
-              <select
-                className="form-select"
-                style={{ fontSize: 12, padding: '4px 8px' }}
-                value={selectedSnapshot ?? ''}
-                onChange={e => setSelectedSnapshot(e.target.value || null)}
-              >
-                <option value="">Latest</option>
-                {snapshots.map(s => (
-                  <option key={s.tag} value={s.snapshotId}>
-                    {s.label}
-                  </option>
-                ))}
-              </select>
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <select
+                  className="form-select"
+                  style={{ fontSize: 12, padding: '4px 8px', flex: 1 }}
+                  value={selectedSnapshot ?? ''}
+                  onChange={e => setSelectedSnapshot(e.target.value || null)}
+                >
+                  <option value="">Latest</option>
+                  {snapshots.map(s => (
+                    <option key={s.tag} value={s.snapshotId}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="btn small secondary"
+                  style={{ fontSize: 11, padding: '4px 6px', flexShrink: 0 }}
+                  onClick={reloadMeta}
+                  title="Reload variables and snapshots (run after seeding new data)"
+                >
+                  ↺
+                </button>
+              </div>
               <div style={{ marginTop: 4, fontSize: 10, color: 'var(--text-secondary)' }}>
                 {selectedSnapshot
                   ? snapshots.find(s => s.snapshotId === selectedSnapshot)?.tag ?? selectedSnapshot.slice(0, 16)
