@@ -32,12 +32,15 @@ import {
 const QUERY_DB = 'ICECHUNK_DB'
 const QUERY_SCHEMA = 'ICECHUNK'
 const MAX_CELLS = 1_500_000
-// TARGET_UK_RAW: backend auto-strides UK raw surface queries to stay under this count.
-// Full UK 2km grid is ~1,011,000 cells — raised to allow native resolution for surface 2D.
-const TARGET_UK_RAW = 1_200_000
-// TARGET_UK_LEVEL_RAW: lower limit for 3D level pre-fetch to avoid loading
-// 33 levels × 1M cells into the browser cache simultaneously.
-const TARGET_UK_LEVEL_RAW = 200_000
+// TARGET_UK_RAW: used for the Snowflake function path (H3 mode and small-area grid).
+// Snowflake external functions have a hard 20 MB response cap (~400K cells max).
+// UK grid mode for large areas uses the direct API path (/api/direct/slice_uk)
+// which has no cap — TARGET_UK_RAW_DIRECT covers those calls.
+const TARGET_UK_RAW        = 250_000    // Snowflake function path (grid H3 + small area grid)
+const TARGET_UK_RAW_DIRECT = 1_200_000  // Direct API path (UK grid mode, no 20 MB cap)
+// 3D level pre-fetch: keep per-level limit to avoid loading 33 levels × large
+// grid into the browser level cache simultaneously.
+const TARGET_UK_LEVEL_RAW = 300_000
 
 /**
  * Map DeckGL zoom level to an H3 resolution that produces hex cells
@@ -339,12 +342,10 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     ? `${dataset}|${activeVar}|${bbox.latMin}|${bbox.latMax}|${bbox.lonMin}|${bbox.lonMax}|${selectedSnapshot}|${renderMode === 'h3' ? h3Res : 'grid'}`
     : ''
 
-  useEffect(() => {
-    if (varMeta.is3D && meta) {
-      prefetchAllLevels()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [level3dCacheKey, meta])
+  // ── Manual refresh (no auto-fetch on bbox/variable/snapshot changes) ─────────
+  // Data only loads when the user clicks "Load / Refresh".
+  // This prevents hammering the backend on every pan, zoom, or setting change.
+  // handleRefresh defined below (after fetchData is declared)
 
   // When heightLevel changes on a 3D var, read from cache (instant, no re-fetch)
   useEffect(() => {
@@ -379,11 +380,12 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
       ? Math.ceil((bbox.latMax - bbox.latMin) / latStepLocal) *
         Math.ceil((bbox.lonMax - bbox.lonMin) / lonStepLocal)
       : estimateCellCount(bbox.latMin, bbox.latMax, bbox.lonMin, bbox.lonMax)
-    // Backend auto-strides large UK requests to keep under TARGET_UK_RAW.
-    // With TARGET_UK_RAW = 1,200,000 the full UK grid (~1,011,000 cells) is
-    // returned at native 2km resolution with no striding.
-    const stride = ukGrid && cellCount > TARGET_UK_RAW
-      ? Math.max(1, Math.ceil(Math.sqrt(cellCount / TARGET_UK_RAW)))
+    // Backend auto-strides large UK requests.
+    // UK grid mode uses the direct API path (no 20 MB Snowflake cap) → TARGET_UK_RAW_DIRECT.
+    // UK H3 mode uses Snowflake function path → TARGET_UK_RAW.
+    const effectiveTarget = ukGrid ? TARGET_UK_RAW_DIRECT : TARGET_UK_RAW
+    const stride = ukGrid && cellCount > effectiveTarget
+      ? Math.max(1, Math.ceil(Math.sqrt(cellCount / effectiveTarget)))
       : 1
     const effectiveCells = ukGrid ? Math.ceil(cellCount / (stride * stride)) : cellCount
     // Only block global queries that are truly enormous; UK grid mode is unrestricted.
@@ -441,17 +443,32 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
              ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`
         rows = await sfQuery(sqlScatter, QUERY_DB, QUERY_SCHEMA)
       } else if (dataset === 'uk' && renderMode === 'points') {
-        // UK 2km — raw grid points (WGS84 lat/lon pre-computed at ingest)
-        rows = await sfQuery(
-          `SELECT f.value:lat::FLOAT AS lat,
-                  f.value:lon::FLOAT AS lon,
-                  f.value:value::FLOAT AS value
-           FROM (SELECT ${QUERY_DB}.${QUERY_SCHEMA}.ICECHUNK_SLICE_UK(
-             '${activeVar}', ${bbox.latMin}, ${bbox.latMax}, ${bbox.lonMin}, ${bbox.lonMax}, ${snapExpr}
-           ) AS result) r, LATERAL FLATTEN(input => r.result:data) f`,
-          QUERY_DB,
-          QUERY_SCHEMA
-        )
+        // UK 2km grid — direct API path (bypasses Snowflake 20 MB external function cap).
+        // Returns the full ~1M native 2km cells for country-scale views.
+        const directRes = await fetch('/api/direct/slice_uk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            variable:    activeVar,
+            lat_min:     bbox.latMin,
+            lat_max:     bbox.latMax,
+            lon_min:     bbox.lonMin,
+            lon_max:     bbox.lonMax,
+            snapshot_id: validSnap ?? null,
+          }),
+        })
+        if (!directRes.ok) {
+          const errBody = await directRes.json().catch(() => ({ error: directRes.statusText }))
+          const errMsg = String((errBody as {error?: string}).error ?? directRes.statusText)
+          if (errMsg.includes('Unknown variable') && selectedSnapshot) {
+            setSelectedSnapshot(null)
+            setError(null)
+            return
+          }
+          throw new Error(errMsg)
+        }
+        const directData = await directRes.json() as { data: Record<string, unknown>[] }
+        rows = directData.data ?? []
       } else if (dataset === 'uk') {
         // UK 2km — H3 aggregated (default, fewer rows)
         rows = await sfQuery(
@@ -514,7 +531,15 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     }
   }, [activeVar, bbox, varMeta, selectedSnapshot, snapshots, meta, h3Res, renderMode, dataset, mapRowsToPoints])
 
-  useEffect(() => { fetchData() }, [fetchData])
+  // Auto-fetch removed — use handleRefresh() / the Load button instead.
+
+  // ── Manual refresh handler ────────────────────────────────────────────────
+  // Data only loads when the user presses "Load / Refresh". Prevents hammering
+  // the backend on every pan, zoom, or setting change.
+  const handleRefresh = useCallback(() => {
+    if (varMeta.is3D && meta) prefetchAllLevels()
+    else fetchData()
+  }, [varMeta, meta, prefetchAllLevels, fetchData])
 
   // ── Build deck.gl layers ───────────────────────────────────────────────────
   const bboxPolygon = [
@@ -552,10 +577,13 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     : (dataset === 'uk' ? 0.032 : 0.09)
 
   // Auto-stride: backend subsamples the UK grid to keep under the target count.
-  // Surface 2D uses TARGET_UK_RAW (1.2M) → full UK returned at native 2km with no stride.
-  // 3D level uses TARGET_UK_LEVEL_RAW (200K) → limited per-level to keep 33-level
-  // pre-fetch cache from using excessive browser memory.
-  const ukTarget = varMeta.is3D ? TARGET_UK_LEVEL_RAW : TARGET_UK_RAW
+  // UK grid mode (surface 2D) goes via the direct API → no 20 MB cap → larger target.
+  // UK H3 mode goes via Snowflake function → lower target (aggregated cells are small).
+  // 3D level pre-fetch uses TARGET_UK_LEVEL_RAW to keep 33-level cache manageable.
+  const isUkDirectPath = dataset === 'uk' && renderMode === 'points' && !varMeta.is3D
+  const ukTarget = varMeta.is3D
+    ? TARGET_UK_LEVEL_RAW
+    : (isUkDirectPath ? TARGET_UK_RAW_DIRECT : TARGET_UK_RAW)
   const ukEstimate = dataset === 'uk' && renderMode === 'points'
     ? Math.ceil((bbox.latMax - bbox.latMin) / latStep) *
       Math.ceil((bbox.lonMax - bbox.lonMin) / lonStep)
@@ -738,8 +766,10 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     ? Math.ceil((bbox.latMax - bbox.latMin) / latStep) *
       Math.ceil((bbox.lonMax - bbox.lonMin) / lonStep)
     : 0
-  const displayStride = ukRawEstimate > ukTarget
-    ? Math.max(1, Math.ceil(Math.sqrt(ukRawEstimate / ukTarget)))
+  // Use the direct-path target for display stride when applicable (no 20 MB cap)
+  const displayTarget = (isUkGrid && !varMeta.is3D) ? TARGET_UK_RAW_DIRECT : ukTarget
+  const displayStride = ukRawEstimate > displayTarget
+    ? Math.max(1, Math.ceil(Math.sqrt(ukRawEstimate / displayTarget)))
     : 1
   const cellCount = isUkGrid
     ? Math.ceil(ukRawEstimate / (displayStride * displayStride))
@@ -940,6 +970,18 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
             ▦ Grid
           </button>
         </div>
+
+        {/* Load / Refresh button — data only loads on demand */}
+        <button
+          className="btn primary"
+          style={{ width: '100%', justifyContent: 'center', marginBottom: 8,
+                   fontWeight: 600, fontSize: 12, letterSpacing: '0.02em' }}
+          onClick={handleRefresh}
+          disabled={loading || loadingLevels || !meta}
+          title="Load data for current bbox, variable and settings"
+        >
+          {loading || loadingLevels ? '⏳ Loading…' : '↺ Load / Refresh'}
+        </button>
 
         {/* Point count */}
         <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>

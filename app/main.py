@@ -89,7 +89,10 @@ def _get_coords(root: zarr.Group):
     return lat, lon
 
 
-MAX_RAW_UK_CELLS = 1_200_000  # target before auto-striding; full UK 2km grid is ~1,011,000 cells
+MAX_RAW_UK_CELLS = 250_000  # Snowflake external functions have a 20 MB response limit.
+                            # At ~55 bytes/cell JSON, 250K cells ≈ 14 MB — safe margin.
+                            # Full UK (~1,011,000 cells) triggers stride=2 → 252K cells.
+                            # Zoomed-in views below 250K are returned at native 2km.
 
 
 def _slice_2d_curvilinear(
@@ -316,6 +319,147 @@ def uk_repo_meta(payload: dict = None):
         return {"data": [[0, result]]}
     except Exception as e:
         logger.exception("UK meta failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Direct API endpoints (no Snowflake function wire format, no 20 MB cap) ────
+# These are called by the Express frontend directly, bypassing Snowflake external
+# functions entirely.  MAX_RAW_DIRECT is much higher since the 20 MB constraint
+# does not apply to direct HTTP calls.
+
+MAX_RAW_DIRECT = 1_200_000  # full UK grid (~1,011,000 cells) at native 2km
+
+class DirectSliceRequest(BaseModel):
+    variable:    str
+    lat_min:     float
+    lat_max:     float
+    lon_min:     float
+    lon_max:     float
+    snapshot_id: Optional[str] = None
+
+class DirectLevelSliceRequest(BaseModel):
+    variable:    str
+    level_idx:   int
+    lat_min:     float
+    lat_max:     float
+    lon_min:     float
+    lon_max:     float
+    snapshot_id: Optional[str] = None
+
+@app.post("/direct/slice_uk")
+def direct_slice_uk(req: DirectSliceRequest):
+    """Direct UK 2km grid slice — bypasses Snowflake 20 MB external-function cap.
+    Accepts simple JSON body; returns {data:[{lat,lon,value}...], row_count, stride}."""
+    try:
+        repo    = open_uk_repo()
+        session = (repo.readonly_session(snapshot_id=req.snapshot_id)
+                   if req.snapshot_id else repo.readonly_session("main"))
+        root    = zarr.open_group(session.store, mode="r")
+
+        lat2d = np.array(root["latitude"][:])
+        lon2d = np.array(root["longitude"][:])
+        mask  = ((lat2d >= req.lat_min) & (lat2d <= req.lat_max) &
+                 (lon2d >= req.lon_min) & (lon2d <= req.lon_max))
+
+        n_cells = int(mask.sum())
+        if n_cells == 0:
+            return {"data": [], "row_count": 0, "stride": 1}
+
+        variables = _discover_variables(root)
+        if req.variable not in variables:
+            raise HTTPException(status_code=400,
+                detail=f"Unknown variable '{req.variable}'. Available: {variables}")
+
+        arr = np.array(root[req.variable][:])
+        while arr.ndim > 2:
+            arr = arr[0]
+
+        # Auto-stride to stay within MAX_RAW_DIRECT (native 2km for full UK)
+        stride = 1
+        if n_cells > MAX_RAW_DIRECT:
+            stride = max(1, int(np.ceil(np.sqrt(n_cells / MAX_RAW_DIRECT))))
+
+        if stride > 1:
+            lat_use  = lat2d[::stride, ::stride]
+            lon_use  = lon2d[::stride, ::stride]
+            arr_use  = arr[::stride, ::stride]
+            mask_use = mask[::stride, ::stride]
+        else:
+            lat_use, lon_use, arr_use, mask_use = lat2d, lon2d, arr, mask
+
+        rows_idx, cols_idx = np.where(mask_use & ~np.isnan(arr_use))
+        rows = [
+            {"lat": round(float(lat_use[ri, ci]), 6),
+             "lon": round(float(lon_use[ri, ci]), 6),
+             "value": round(float(arr_use[ri, ci]), 6)}
+            for ri, ci in zip(rows_idx.tolist(), cols_idx.tolist())
+        ]
+        return {"data": rows, "row_count": len(rows), "stride": stride,
+                "snapshot_id": session.snapshot_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Direct UK slice failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/direct/level_slice_uk")
+def direct_level_slice_uk(req: DirectLevelSliceRequest):
+    """Direct UK 2km 3D level slice — bypasses Snowflake 20 MB cap.
+    Accepts simple JSON body; returns {data:[{lat,lon,value,height_m}...], total_levels, level_units}."""
+    try:
+        repo    = open_uk_repo()
+        session = (repo.readonly_session(snapshot_id=req.snapshot_id)
+                   if req.snapshot_id else repo.readonly_session("main"))
+        root    = zarr.open_group(session.store, mode="r")
+
+        if req.variable not in root:
+            raise HTTPException(status_code=400, detail=f"Variable '{req.variable}' not found.")
+        if root[req.variable].ndim != 3:
+            raise HTTPException(status_code=400, detail=f"Variable '{req.variable}' is not 3D.")
+
+        level_value, level_units, n_levels = _get_level_meta(root, req.variable, req.level_idx)
+        if req.level_idx < 0 or req.level_idx >= n_levels:
+            raise HTTPException(status_code=400,
+                detail=f"level_idx must be 0–{n_levels-1}, got {req.level_idx}")
+
+        lat2d = np.array(root["latitude"][:])
+        lon2d = np.array(root["longitude"][:])
+        mask  = ((lat2d >= req.lat_min) & (lat2d <= req.lat_max) &
+                 (lon2d >= req.lon_min) & (lon2d <= req.lon_max))
+
+        arr = root[req.variable][req.level_idx]
+
+        # Stride to keep per-level response manageable in the browser level cache
+        MAX_LEVEL_DIRECT = 300_000
+        n_cells = int(mask.sum())
+        stride = 1
+        if n_cells > MAX_LEVEL_DIRECT:
+            stride = max(1, int(np.ceil(np.sqrt(n_cells / MAX_LEVEL_DIRECT))))
+
+        if stride > 1:
+            lat_use  = lat2d[::stride, ::stride]
+            lon_use  = lon2d[::stride, ::stride]
+            arr_use  = arr[::stride, ::stride]
+            mask_use = mask[::stride, ::stride]
+        else:
+            lat_use, lon_use, arr_use, mask_use = lat2d, lon2d, arr, mask
+
+        rows_idx, cols_idx = np.where(mask_use & ~np.isnan(arr_use))
+        rows = [
+            {"lat":      round(float(lat_use[ri, ci]), 6),
+             "lon":      round(float(lon_use[ri, ci]), 6),
+             "value":    round(float(arr_use[ri, ci]), 6),
+             "height_m": round(float(level_value), 4)}
+            for ri, ci in zip(rows_idx.tolist(), cols_idx.tolist())
+        ]
+        return {"data": rows, "row_count": len(rows), "stride": stride,
+                "total_levels": n_levels, "level_units": level_units,
+                "snapshot_id": session.snapshot_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Direct UK level slice failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 

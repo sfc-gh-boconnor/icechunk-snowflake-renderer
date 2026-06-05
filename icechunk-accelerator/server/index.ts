@@ -17,6 +17,10 @@ app.use((req, _res, next) => {
 const PORT = parseInt(process.env.PORT ?? '3001', 10)
 const DIST = path.join(__dirname, '../dist')
 
+// URL of the icechunk-service SPCS backend (set via ICECHUNK_SERVICE_URL env var).
+// Used for direct API calls that bypass Snowflake external functions (no 20 MB cap).
+const ICECHUNK_SERVICE_URL = process.env.ICECHUNK_SERVICE_URL || 'http://icechunk-service:8080'
+
 // ── Snowflake connection ──────────────────────────────────────────────────────
 
 // SPCS auto-injects SNOWFLAKE_HOST and SNOWFLAKE_TOKEN
@@ -326,6 +330,46 @@ app.get('/api/snapshots', async (_req: Request, res: Response) => {
   } catch (err) {
     console.error(new Date().toISOString(), '[/api/snapshots]', String(err))
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
+
+// ── Direct API proxy routes ────────────────────────────────────────────────────
+// Call the SPCS backend directly, bypassing Snowflake external functions.
+// No 20 MB response cap — the full UK grid (~1M cells) can be returned.
+
+app.post('/api/direct/slice_uk', async (req: Request, res: Response) => {
+  try {
+    const response = await fetch(`${ICECHUNK_SERVICE_URL}/direct/slice_uk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body),
+    })
+    if (!response.ok) {
+      const text = await response.text()
+      return res.status(response.status).json({ error: text })
+    }
+    const data = await response.json()
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
+  }
+})
+
+app.post('/api/direct/level_slice_uk', async (req: Request, res: Response) => {
+  try {
+    const response = await fetch(`${ICECHUNK_SERVICE_URL}/direct/level_slice_uk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body),
+    })
+    if (!response.ok) {
+      const text = await response.text()
+      return res.status(response.status).json({ error: text })
+    }
+    const data = await response.json()
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: String(err) })
   }
 })
 
