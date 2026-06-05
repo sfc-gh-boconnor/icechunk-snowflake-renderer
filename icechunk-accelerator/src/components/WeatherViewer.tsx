@@ -146,23 +146,33 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
 
   const varMeta = useMemo(() => resolveVariableMeta(activeVar), [activeVar])
 
-  // When meta loads, switch to the first available variable only if the active
-  // variable is unknown to both meta AND our static VARIABLES list.
-  // This avoids resetting cloud_amount_on_height_levels (which is not in the
-  // main-branch meta.variables but IS a valid selectable variable).
+  // When meta loads, switch to the first available variable if the current one
+  // isn't present in the repo:
+  // - UK: if activeVar isn't in meta.variables (e.g. air_temperature not yet seeded),
+  //   switch to the first surface UK var that IS in meta.variables.
+  // - Global: only reset if var is unknown to both meta AND the static VARIABLES list
+  //   (avoids resetting cloud_amount_on_height_levels which lives in a separate snapshot).
   useEffect(() => {
-    if (meta?.variables?.length
-      && !meta.variables.includes(activeVar)
-      && !VARIABLES.find(v => v.key === activeVar)) {
-      setActiveVar(meta.variables[0])
+    if (!meta?.variables?.length) return
+    if (dataset === 'uk') {
+      if (!meta.variables.includes(activeVar) && !resolveVariableMeta(activeVar).is3D) {
+        const firstAvailable = UK_VARIABLES.find(k => meta.variables.includes(k))
+        if (firstAvailable) setActiveVar(firstAvailable)
+      }
+    } else {
+      if (!meta.variables.includes(activeVar) && !VARIABLES.find(v => v.key === activeVar)) {
+        setActiveVar(meta.variables[0])
+      }
     }
-  }, [meta])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meta, dataset])
 
   // When dataset changes: zoom to its default bbox and validate active variable
   useEffect(() => {
     if (dataset === 'uk') {
       setBboxPreset(UK_BBOX)
-      if (!UK_VARIABLES.includes(activeVar)) setActiveVar('air_temperature')
+      // Only reset if var is not known for UK at all; meta will handle seeded-var check
+      if (!UK_VARIABLES.includes(activeVar)) setActiveVar(UK_VARIABLES[0])
     } else {
       if (activeVar === 'visibility_at_screen_level') setActiveVar('air_temperature')
     }
