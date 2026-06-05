@@ -299,10 +299,11 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         loaded = 1
       }
     } catch (err) {
-      // If snapshot doesn't have this 3D var, fall back to main branch and retry
+      // If snapshot doesn't have this 3D var, fall back to main branch
       if (String(err).includes('Unknown variable') && selectedSnapshot) {
         setSelectedSnapshot(null)
         setLoadingLevels(false)
+        setError('Snapshot switched to Latest — press ↺ Refresh to load.')
         return
       }
       /* level 0 failed */ }
@@ -462,7 +463,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           const errMsg = String((errBody as {error?: string}).error ?? directRes.statusText)
           if (errMsg.includes('Unknown variable') && selectedSnapshot) {
             setSelectedSnapshot(null)
-            setError(null)
+            setError('Snapshot switched to Latest — press ↺ Refresh to load.')
             return
           }
           throw new Error(errMsg)
@@ -519,10 +520,10 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     } catch (err) {
       const errMsg = String(err)
       // If the selected snapshot doesn't contain the requested variable,
-      // automatically fall back to the main branch (null snapshot) and retry.
+      // automatically fall back to the main branch and tell the user to re-run.
       if (errMsg.includes('Unknown variable') && selectedSnapshot) {
         setSelectedSnapshot(null)
-        setError(null)  // fetchData will re-run via selectedSnapshot change
+        setError('Snapshot switched to Latest — press ↺ Refresh to load.')
         return
       }
       setError(errMsg)
