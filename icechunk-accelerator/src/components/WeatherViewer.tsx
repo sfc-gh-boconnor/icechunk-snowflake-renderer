@@ -834,7 +834,15 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     : estimateCellCount(bbox.latMin, bbox.latMax, bbox.lonMin, bbox.lonMax)
 
   // ── Save to Snowflake table ───────────────────────────────────────────────
-  const variableKeys = meta?.variables?.length ? meta.variables : VARIABLES.map(v => v.key)
+  // Save-to-table variable list: meta.variables includes coordinate arrays
+  // (height_levels, pressure_levels, cloud_height_levels) and 3D variables
+  // that require ICECHUNK_LEVEL_SLICE_UK, not ICECHUNK_SLICE_UK.
+  // Only include 2D surface variables that are in our known UK_VARIABLES set.
+  const savableVars = (meta?.variables ?? VARIABLES.map(v => v.key))
+    .filter(v => {
+      const vm = resolveVariableMeta(v)
+      return !vm.is3D && (dataset !== 'uk' || UK_VARIABLES.includes(v))
+    })
 
   const handleSaveTable = async () => {
     if (!tableName.trim()) return
@@ -852,7 +860,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           lon_min:     bbox.lonMin,
           lon_max:     bbox.lonMax,
           snapshot_id: selectedSnapshot ?? null,
-          variables:   variableKeys.filter(v => !v.startsWith('cloud_amount_on_height')),
+          variables:   savableVars,
           pivoted,
           dataset,
         }),
@@ -1258,9 +1266,9 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           {/* Schema label + variable count */}
           <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 8 }}>
             ICECHUNK_DB.ICECHUNK &nbsp;·&nbsp;
-            {variableKeys.filter(v => !v.startsWith('cloud_amount_on_height')).length} variables
+            {savableVars.length} variables
             {cellCount < MAX_CELLS && data.length > 0
-              ? ` · ~${(data.length * variableKeys.filter(v => !v.startsWith('cloud_amount_on_height')).length).toLocaleString()} rows est.`
+              ? ` · ~${(data.length * savableVars.length).toLocaleString()} rows est.`
               : ''}
           </div>
 
