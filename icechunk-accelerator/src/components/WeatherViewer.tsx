@@ -418,6 +418,13 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     if (!varMeta) return
     if (!meta) return
     if (varMeta.is3D) return  // 3D handled by prefetchAllLevels
+    // Guard: if the active variable isn't in the UK repo (e.g. air_temperature not seeded),
+    // switch to the first available UK variable and abort — effect will re-trigger.
+    if (dataset === 'uk' && meta.variables?.length && !meta.variables.includes(activeVar)) {
+      const firstAvailable = UK_VARIABLES.find(k => meta.variables.includes(k))
+      if (firstAvailable) setActiveVar(firstAvailable)
+      return
+    }
     // For UK grid mode use the actual ~2km spacing to estimate cell count;
     // the global estimator uses 10km spacing and underestimates by ~25x.
     const ukGrid = dataset === 'uk' && renderMode === 'points'
