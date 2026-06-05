@@ -295,7 +295,14 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
         setLevelsLoaded(1)
         loaded = 1
       }
-    } catch { /* level 0 failed */ }
+    } catch (err) {
+      // If snapshot doesn't have this 3D var, fall back to main branch and retry
+      if (String(err).includes('Unknown variable') && selectedSnapshot) {
+        setSelectedSnapshot(null)
+        setLoadingLevels(false)
+        return
+      }
+      /* level 0 failed */ }
 
     // Fetch remaining levels in parallel, batched 8 at a time
     const BATCH = 8
@@ -493,7 +500,15 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
       }
       setData(points)
     } catch (err) {
-      setError(String(err))
+      const errMsg = String(err)
+      // If the selected snapshot doesn't contain the requested variable,
+      // automatically fall back to the main branch (null snapshot) and retry.
+      if (errMsg.includes('Unknown variable') && selectedSnapshot) {
+        setSelectedSnapshot(null)
+        setError(null)  // fetchData will re-run via selectedSnapshot change
+        return
+      }
+      setError(errMsg)
     } finally {
       setLoading(false)
     }
