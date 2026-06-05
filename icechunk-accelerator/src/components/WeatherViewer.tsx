@@ -104,6 +104,13 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   const [pivoted, setPivoted] = useState(false)   // false = long format, true = wide/pivoted
   const tableInputRef = useRef<HTMLInputElement>(null)
 
+  // ── Table analysis panel state ────────────────────────────────────────────
+  const [tableViewOpen, setTableViewOpen] = useState(false)
+  const [tablePreview, setTablePreview] = useState<Record<string, unknown>[]>([])
+  const [tableStats, setTableStats] = useState<Record<string, unknown>[]>([])
+  const [tableViewLoading, setTableViewLoading] = useState(false)
+  const [tableViewTab, setTableViewTab] = useState<'preview' | 'stats'>('preview')
+
   const [viewState, setViewState] = useState({
     longitude: 0,
     latitude: 20,
@@ -833,7 +840,10 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           dataset,
         }),
       })
-      const body = await res.json() as { table?: string; row_count?: number; error?: string }
+      const isJson = res.headers.get('content-type')?.includes('application/json')
+      const body = isJson
+        ? await res.json() as { table?: string; row_count?: number; error?: string }
+        : { error: await res.text() }
       if (!res.ok) { setSaveError(body.error ?? 'Unknown error'); return }
       setSaveResult({ table: body.table!, row_count: body.row_count ?? 0 })
     } catch (err) {
@@ -849,6 +859,35 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     })
+  }
+
+  // ── Fetch preview + stats for the table analysis panel ──────────────────────
+  const fetchTableView = async (tableFqn: string) => {
+    setTableViewLoading(true)
+    setTableViewOpen(true)
+    setTableViewTab('preview')
+    setTablePreview([])
+    setTableStats([])
+    try {
+      const [previewRows, statsRows] = await Promise.all([
+        sfQuery(`SELECT * FROM ${tableFqn} LIMIT 200`, QUERY_DB, QUERY_SCHEMA),
+        sfQuery(
+          `SELECT variable,
+                  COUNT(*)         AS n,
+                  MIN(value)       AS min_val,
+                  MAX(value)       AS max_val,
+                  AVG(value)       AS avg_val,
+                  STDDEV(value)    AS std_val
+           FROM ${tableFqn}
+           GROUP BY variable
+           ORDER BY variable`,
+          QUERY_DB, QUERY_SCHEMA
+        ),
+      ])
+      setTablePreview(previewRows)
+      setTableStats(statsRows)
+    } catch { /* non-critical */ }
+    setTableViewLoading(false)
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -906,7 +945,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           <select
             className="form-select"
             value={activeVar}
-            onChange={e => setActiveVar(e.target.value)}
+            onChange={e => { setActiveVar(e.target.value); setData([]) }}
           >
             {availableVars.map(v => (
               <option key={v.key} value={v.key}>
@@ -990,7 +1029,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           <button
             className={`btn small ${renderMode === 'h3' ? 'primary' : 'secondary'}`}
             style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
-            onClick={() => setRenderMode('h3')}
+            onClick={() => { setRenderMode('h3'); setData([]) }}
             title="H3 hexagons — Python aggregation, faster"
           >
             ⬡ H3
@@ -998,7 +1037,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           <button
             className={`btn small ${renderMode === 'points' ? 'primary' : 'secondary'}`}
             style={{ flex: 1, justifyContent: 'center', fontSize: 11 }}
-            onClick={() => setRenderMode('points')}
+            onClick={() => { setRenderMode('points'); setData([]) }}
             title={`Native grid cells (${dataset === 'uk' ? '~2km squares' : '~10km squares'})`}
           >
             ▦ Grid
@@ -1254,17 +1293,26 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
               <div style={{
                 fontSize: 10, fontFamily: 'monospace',
                 color: 'var(--text-secondary)',
-                wordBreak: 'break-all', marginBottom: 4,
+                wordBreak: 'break-all', marginBottom: 6,
               }}>
                 {saveResult.table}
               </div>
-              <button
-                className="btn secondary small"
-                style={{ fontSize: 10, padding: '2px 8px' }}
-                onClick={handleCopyTable}
-              >
-                {copied ? '✓ Copied' : 'Copy name'}
-              </button>
+              <div style={{ display: 'flex', gap: 4 }}>
+                <button
+                  className="btn secondary small"
+                  style={{ fontSize: 10, padding: '2px 8px' }}
+                  onClick={handleCopyTable}
+                >
+                  {copied ? '✓ Copied' : 'Copy name'}
+                </button>
+                <button
+                  className="btn primary small"
+                  style={{ fontSize: 10, padding: '2px 8px', flex: 1, justifyContent: 'center' }}
+                  onClick={() => fetchTableView(saveResult.table)}
+                >
+                  📊 View & Analyse
+                </button>
+              </div>
             </div>
           )}
 
@@ -1327,6 +1375,202 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           )}
         </div>
       </div>
+
+      {/* ── Table Analysis Overlay ───────────────────────────────────────── */}
+      {tableViewOpen && (
+        <div style={{
+          position: 'absolute', inset: 0, zIndex: 200,
+          background: 'rgba(13,17,23,0.96)',
+          display: 'flex', flexDirection: 'column',
+          fontFamily: 'Inter, sans-serif',
+        }}>
+          {/* Header */}
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '12px 16px', borderBottom: '1px solid var(--border)',
+            flexShrink: 0,
+          }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text)' }}>
+                📊 Table Analysis
+              </div>
+              <div style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'monospace', marginTop: 2 }}>
+                {saveResult?.table}
+              </div>
+            </div>
+            <button
+              className="btn secondary small"
+              style={{ fontSize: 12, padding: '4px 12px' }}
+              onClick={() => setTableViewOpen(false)}
+            >
+              ✕ Close
+            </button>
+          </div>
+
+          {/* Tab bar */}
+          <div style={{
+            display: 'flex', gap: 0, borderBottom: '1px solid var(--border)',
+            flexShrink: 0,
+          }}>
+            {(['preview', 'stats'] as const).map(tab => (
+              <button
+                key={tab}
+                onClick={() => setTableViewTab(tab)}
+                style={{
+                  padding: '8px 20px', fontSize: 12, border: 'none', cursor: 'pointer',
+                  background: tableViewTab === tab ? 'var(--surface)' : 'transparent',
+                  color: tableViewTab === tab ? 'var(--accent)' : 'var(--text-secondary)',
+                  borderBottom: tableViewTab === tab ? '2px solid var(--accent)' : '2px solid transparent',
+                  fontWeight: tableViewTab === tab ? 600 : 400,
+                  transition: 'all 0.15s',
+                }}
+              >
+                {tab === 'preview' ? '📋 Data Preview' : '📈 Statistics'}
+              </button>
+            ))}
+          </div>
+
+          {/* Content */}
+          <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+            {tableViewLoading ? (
+              <div style={{ color: 'var(--text-secondary)', fontSize: 12, textAlign: 'center', marginTop: 40 }}>
+                Loading data…
+              </div>
+            ) : tableViewTab === 'preview' ? (
+              /* ── Data Preview tab ── */
+              tablePreview.length === 0 ? (
+                <div style={{ color: 'var(--text-secondary)', fontSize: 12 }}>No data returned.</div>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ borderCollapse: 'collapse', fontSize: 11, width: '100%', color: 'var(--text)' }}>
+                    <thead>
+                      <tr style={{ background: 'var(--surface)', position: 'sticky', top: 0, zIndex: 1 }}>
+                        {Object.keys(tablePreview[0]).map(col => (
+                          <th key={col} style={{
+                            padding: '6px 10px', textAlign: 'left',
+                            border: '1px solid var(--border)',
+                            fontWeight: 600, fontSize: 10,
+                            color: 'var(--accent)', whiteSpace: 'nowrap',
+                          }}>
+                            {col}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tablePreview.map((row, i) => (
+                        <tr key={i} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)' }}>
+                          {Object.values(row).map((cell, j) => (
+                            <td key={j} style={{
+                              padding: '4px 10px',
+                              border: '1px solid var(--border)',
+                              fontFamily: 'monospace', fontSize: 10,
+                              whiteSpace: 'nowrap',
+                            }}>
+                              {cell === null ? <span style={{ color: 'var(--text-secondary)' }}>NULL</span>
+                                : typeof cell === 'number' ? Number(cell).toPrecision(6)
+                                : String(cell)}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-secondary)' }}>
+                    Showing first {tablePreview.length} rows
+                  </div>
+                </div>
+              )
+            ) : (
+              /* ── Statistics tab ── */
+              tableStats.length === 0 ? (
+                <div style={{ color: 'var(--text-secondary)', fontSize: 12 }}>No statistics available.</div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+                  {tableStats.map((row, i) => {
+                    const varKey = String(row.VARIABLE ?? row.variable ?? '')
+                    const vm = resolveVariableMeta(varKey)
+                    const n    = Number(row.N    ?? row.n    ?? 0)
+                    const minV = Number(row.MIN_VAL ?? row.min_val ?? 0)
+                    const maxV = Number(row.MAX_VAL ?? row.max_val ?? 0)
+                    const avgV = Number(row.AVG_VAL ?? row.avg_val ?? 0)
+                    const stdV = Number(row.STD_VAL ?? row.std_val ?? 0)
+                    const fmt = (v: number) => {
+                      const transformed = vm.transform(v)
+                      return `${transformed.toFixed(2)} ${vm.unit}`
+                    }
+                    return (
+                      <div key={i} style={{
+                        background: 'var(--surface)', border: '1px solid var(--border)',
+                        borderRadius: 6, padding: 12,
+                      }}>
+                        <div style={{
+                          fontSize: 11, fontWeight: 600, color: 'var(--accent)',
+                          marginBottom: 8, borderBottom: '1px solid var(--border)', paddingBottom: 6,
+                        }}>
+                          {vm.label}
+                          <span style={{ fontSize: 9, color: 'var(--text-secondary)', fontWeight: 400, marginLeft: 6 }}>
+                            ({varKey})
+                          </span>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 11 }}>
+                          {[
+                            ['Count', n.toLocaleString()],
+                            ['Unit', vm.unit],
+                            ['Min', fmt(minV)],
+                            ['Max', fmt(maxV)],
+                            ['Avg', fmt(avgV)],
+                            ['Std Dev', fmt(stdV)],
+                          ].map(([label, value]) => (
+                            <div key={label as string}>
+                              <span style={{ color: 'var(--text-secondary)', fontSize: 10 }}>{label}: </span>
+                              <span style={{ color: 'var(--text)', fontFamily: 'monospace' }}>{value}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )
+            )}
+          </div>
+
+          {/* Ask Agent footer — injected via onMapContext */}
+          {!tableViewLoading && saveResult && onMapContext && (
+            <div style={{
+              padding: '12px 16px', borderTop: '1px solid var(--border)',
+              display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+            }}>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', flex: 1 }}>
+                Ask the AI agent to analyse this dataset for patterns, anomalies, or comparisons.
+              </div>
+              <button
+                className="btn primary"
+                style={{ fontSize: 12, padding: '6px 14px', flexShrink: 0 }}
+                onClick={() => {
+                  const statsLines = tableStats.map(row => {
+                    const varKey = String(row.VARIABLE ?? row.variable ?? '')
+                    const vm = resolveVariableMeta(varKey)
+                    const minV = Number(row.MIN_VAL ?? row.min_val ?? 0)
+                    const maxV = Number(row.MAX_VAL ?? row.max_val ?? 0)
+                    const avgV = Number(row.AVG_VAL ?? row.avg_val ?? 0)
+                    return `• ${vm.label}: min ${vm.transform(minV).toFixed(2)}${vm.unit}, max ${vm.transform(maxV).toFixed(2)}${vm.unit}, avg ${vm.transform(avgV).toFixed(2)}${vm.unit}`
+                  }).join('\n')
+                  const msg = `I've saved weather data to the Snowflake table ${saveResult.table}.
+It contains ${saveResult.row_count.toLocaleString()} rows covering lat ${bbox.latMin}–${bbox.latMax}, lon ${bbox.lonMin}–${bbox.lonMax}.
+Statistics:\n${statsLines}
+What patterns, anomalies, or insights can you identify in this data?`
+                  onMapContext(msg)
+                  setTableViewOpen(false)
+                }}
+              >
+                ✦ Ask Agent
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
