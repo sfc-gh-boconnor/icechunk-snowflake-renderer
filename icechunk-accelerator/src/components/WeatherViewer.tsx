@@ -652,8 +652,9 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
 
   // Multiply by 1.015 (global) / 1.001 (UK) to fill hairline gaps between cells.
   // Global: WebGL sub-pixel gaps show the dark basemap → need more overlap.
-  // UK: curvilinear cells tile tightly already → minimal overlap avoids white seams.
-  const overlap = dataset === 'uk' ? 1.001 : 1.015
+  // UK: curvilinear grid means lat/lon rectangles don't perfectly tile —
+  //     1.02 overlap fills sub-pixel gaps when zoomed without visible colour bleed.
+  const overlap = dataset === 'uk' ? 1.02 : 1.015
   const halfDegLat = (latStep / 2) * (dataset === 'uk' ? ukStride : 1) * overlap
   const halfDegLon = (lonStep / 2) * (dataset === 'uk' ? ukStride : 1) * overlap
 
