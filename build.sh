@@ -5,12 +5,13 @@
 # Tags each image with BOTH the patch version (from VERSION file) AND :latest
 #
 # Usage:
-#   bash build.sh [--service-only | --accel-only] [--bump patch|minor|major]
+#   bash build.sh [--service-only | --accel-only] [--bump patch|minor|major] [--deploy]
 #
 # Examples:
-#   bash build.sh                        # build both with current VERSION
-#   bash build.sh --bump patch           # bump patch, then build both
-#   bash build.sh --accel-only --bump patch  # bump patch, rebuild frontend only
+#   bash build.sh                               # build both with current VERSION
+#   bash build.sh --bump patch                  # bump patch, then build both
+#   bash build.sh --accel-only --bump patch     # bump patch, rebuild frontend only
+#   bash build.sh --accel-only --bump patch --deploy  # build + deploy + print URL
 # =============================================================================
 set -euo pipefail
 
@@ -22,6 +23,7 @@ REPO="icechunk_db/icechunk/icechunk_repo"
 BUILD_SERVICE=true
 BUILD_ACCEL=true
 BUMP=""
+DEPLOY=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +32,7 @@ while [[ $# -gt 0 ]]; do
     --service-only) BUILD_ACCEL=false;   shift ;;
     --accel-only)   BUILD_SERVICE=false; shift ;;
     --bump)         BUMP="$2";           shift 2 ;;
+    --deploy)       DEPLOY=true;         shift ;;
     *) echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
@@ -94,3 +97,12 @@ if $BUILD_ACCEL; then
 fi
 
 echo "=== Done: v${VERSION} pushed ==="
+
+# ── Optional deploy + URL print ──────────────────────────────────────────────
+if [[ "$DEPLOY" == "true" ]]; then
+  echo ""
+  DEPLOY_FLAGS=""
+  $BUILD_SERVICE || DEPLOY_FLAGS="$DEPLOY_FLAGS --accel-only"
+  $BUILD_ACCEL   || DEPLOY_FLAGS="$DEPLOY_FLAGS --service-only"
+  bash "${SCRIPT_DIR}/deploy.sh" --connection "$CONNECTION" --version "$VERSION" $DEPLOY_FLAGS
+fi

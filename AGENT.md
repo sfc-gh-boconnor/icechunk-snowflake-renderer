@@ -169,21 +169,22 @@ The `LEVEL_COORD_MAP` in `main.py` maps each 3D variable to its zarr coordinate 
 ## Common Commands
 
 ```bash
-# Build and push both images with patch version bump
-bash build.sh --bump patch
+# Build + deploy + print URL in one step (most common workflow)
+bash build.sh --accel-only --bump patch --deploy    # frontend only
+bash build.sh --service-only --bump patch --deploy  # backend only
+bash build.sh --bump patch --deploy                  # both
 
-# Backend only (Python changes)
+# Build only (no deploy)
+bash build.sh --accel-only --bump patch
 bash build.sh --service-only --bump patch
 
-# Frontend only (React/Express changes)
-bash build.sh --accel-only --bump patch
+# Deploy only (already built) — always prints the new URL
+bash deploy.sh --accel-only       # frontend
+bash deploy.sh --service-only     # backend
+bash deploy.sh                    # both
 
-# Deploy both services
-snow sql -c internal-marketplace -f .cortex/skills/icechunk-accelerator/scripts/03_deploy_services.sql
-
-# Re-apply EAIs after any spec change (ALWAYS required)
-snow sql -c internal-marketplace -q "ALTER SERVICE ICECHUNK_DB.ICECHUNK.ICECHUNK_SERVICE SET EXTERNAL_ACCESS_INTEGRATIONS = (ICECHUNK_S3_EAI, MET_OFFICE_ASDI_EAI);"
-snow sql -c internal-marketplace -q "ALTER SERVICE ICECHUNK_DB.ICECHUNK.ICECHUNK_ACCELERATOR_SERVICE SET EXTERNAL_ACCESS_INTEGRATIONS = (FLEET_INTEL_MAP_TILES_EAI);"
+# Get the current live URL (run this after any deploy)
+snow sql -c internal-marketplace -q "SHOW ENDPOINTS IN SERVICE ICECHUNK_DB.ICECHUNK.ICECHUNK_ACCELERATOR_SERVICE;"
 
 # Check service status
 snow sql -c internal-marketplace -q "CALL SYSTEM\$GET_SERVICE_STATUS('ICECHUNK_DB.ICECHUNK.ICECHUNK_SERVICE');"
@@ -215,27 +216,39 @@ snow sql -c internal-marketplace -f .cortex/skills/icechunk-accelerator/scripts/
 
 2. **`AWS_DEFAULT_REGION` must be `us-west-2`** in the backend spec. The bucket is in us-west-2 and the EAI network rule only allows that endpoint.
 
-3. **EAIs must be re-applied after every spec change.** `ALTER SERVICE FROM SPECIFICATION` silently drops `EXTERNAL_ACCESS_INTEGRATIONS`.
+3. **EAIs must be re-applied after every spec change.** `ALTER SERVICE FROM SPECIFICATION` silently drops `EXTERNAL_ACCESS_INTEGRATIONS`. Use `bash deploy.sh` which handles this automatically and always prints the new URL.
+
+4. **The ingress URL changes after every `ALTER SERVICE FROM SPECIFICATION`.** Always run `SHOW ENDPOINTS IN SERVICE ICECHUNK_ACCELERATOR_SERVICE` after any deploy and give the user the new URL. The `deploy.sh` script does this automatically.
 
 4. **All service functions use `ENDPOINT = 'http-endpoint'`**, not `'api'`.
 
-5. **CARTO tile style: use `dark_all`**, not `dark_matter_nolabels` (returns 502 as of mid-2026).
+5. **Use `bash deploy.sh` for all SPCS deployments** (not manual `snow sql` ALTER SERVICE). This guarantees EAIs are applied and the URL is always shown:
+```bash
+bash deploy.sh --accel-only          # frontend only
+bash deploy.sh --service-only        # backend only
+bash deploy.sh                       # both
+bash build.sh --accel-only --bump patch --deploy  # build + deploy in one step
+```
 
-6. **H3 cell indices are computed by the Python backend** — no client-side h3-js needed.
+6. **The ingress URL changes after every `ALTER SERVICE FROM SPECIFICATION`.** Always print the new URL — `deploy.sh` does this automatically via `SHOW ENDPOINTS`.
 
-7. **Partition fetching is parallel** in `server/index.ts`. Do not revert to sequential.
+7. **CARTO tile style: use `dark_all`**, not `dark_matter_nolabels` (returns 502 as of mid-2026).
 
-8. **Agent model must be `orchestration: auto`** — do not hardcode `claude-sonnet-4-7` etc.
+8. **H3 cell indices are computed by the Python backend** — no client-side h3-js needed.
 
-9. **`ICECHUNK_DB` role needs `CORTEX_USER`** for agent and tool procedures to call AI_COMPLETE.
+8. **Partition fetching is parallel** in `server/index.ts`. Do not revert to sequential.
 
-10. **Global variable dropdown is filtered**: `VARIABLES.filter(v => !v.is3D || v.key === 'cloud_amount_on_height_levels')`. UK-only 3D pressure/height vars do NOT appear in the global dropdown — they have no data in the global repo.
+9. **Agent model must be `orchestration: auto`** — do not hardcode `claude-sonnet-4-7` etc.
 
-11. **UK 3D variables route through `ICECHUNK_LEVEL_SLICE_H3_UK`** (generic), not the cloud-specific endpoints. `LEVEL_COORD_MAP` in `main.py` maps variable → coordinate array.
+10. **`ICECHUNK_DB` role needs `CORTEX_USER`** for agent and tool procedures to call AI_COMPLETE.
 
-12. **Grid cell size is derived from `meta.grid`, never hardcoded.** Formula: `latStep = (lat_range[1] - lat_range[0]) / (lat_count - 1)`, `halfDegLat = (latStep / 2) * stride * overlap`. Falls back to 0.09° (global) / 0.019° lat (UK) only while meta is loading.
+11. **Global variable dropdown is filtered**: `VARIABLES.filter(v => !v.is3D || v.key === 'cloud_amount_on_height_levels')`. UK-only 3D pressure/height vars do NOT appear in the global dropdown — they have no data in the global repo.
 
-13. **Snapshot cross-dataset guard**: `validSnapshot = selectedSnapshot && snapshots.find(s => s.snapshotId === selectedSnapshot) ? selectedSnapshot : null`. Prevents passing a stale global snapshot ID to UK endpoints on dataset switch.
+12. **UK 3D variables route through `ICECHUNK_LEVEL_SLICE_H3_UK`** (generic), not the cloud-specific endpoints. `LEVEL_COORD_MAP` in `main.py` maps variable → coordinate array.
+
+13. **Grid cell size is derived from `meta.grid`, never hardcoded.** Formula: `latStep = (lat_range[1] - lat_range[0]) / (lat_count - 1)`, `halfDegLat = (latStep / 2) * stride * overlap`. Falls back to 0.09° (global) / 0.019° lat (UK) only while meta is loading.
+
+14. **Snapshot cross-dataset guard**: `validSnapshot = selectedSnapshot && snapshots.find(s => s.snapshotId === selectedSnapshot) ? selectedSnapshot : null`. Prevents passing a stale global snapshot ID to UK endpoints on dataset switch.
 
 ---
 

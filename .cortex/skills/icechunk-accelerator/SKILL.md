@@ -141,12 +141,23 @@ bash build.sh --accel-only  --bump patch    # React frontend only
 snow sql -f scripts/03_deploy_services.sql -c <CONNECTION>
 ```
 
-**⚠️ CRITICAL — EAIs ALWAYS reset on spec change:**
+**⚠️ CRITICAL — EAIs ALWAYS reset on spec change. Use `deploy.sh` which handles this automatically and prints the new URL:**
+```bash
+bash deploy.sh --accel-only    # frontend only (most common)
+bash deploy.sh                 # both services
+```
+
+Or manually:
 ```sql
 ALTER SERVICE ICECHUNK_DB.ICECHUNK.ICECHUNK_SERVICE
   SET EXTERNAL_ACCESS_INTEGRATIONS = (ICECHUNK_S3_EAI, MET_OFFICE_ASDI_EAI);
 ALTER SERVICE ICECHUNK_DB.ICECHUNK.ICECHUNK_ACCELERATOR_SERVICE
   SET EXTERNAL_ACCESS_INTEGRATIONS = (FLEET_INTEL_MAP_TILES_EAI);
+```
+
+**⚠️ IMPORTANT — The ingress URL changes after every spec update.** `deploy.sh` always fetches and prints the new URL. If you ran `ALTER SERVICE` manually, run:
+```sql
+SHOW ENDPOINTS IN SERVICE ICECHUNK_ACCELERATOR_SERVICE;
 ```
 
 **Wait for RUNNING:**
@@ -293,6 +304,7 @@ All functions return VARIANT. Use `LATERAL FLATTEN(input => result:data)` to exp
 | No files downloaded for run stamp | ASDI lags 6-12 h | Backend auto-falls back up to 6 hours |
 | Only 6 data points visible | Old synthetic data in latest snapshot | Run `ICECHUNK_SEED()` to overwrite |
 | Agent returns 0 chars | Hardcoded model not available | Set `models: orchestration: auto` in `05_create_agent.sql` |
+| Ingress URL stopped working / 404 | URL changed after `ALTER SERVICE FROM SPECIFICATION` | Run `SHOW ENDPOINTS IN SERVICE ICECHUNK_ACCELERATOR_SERVICE;` or `bash deploy.sh --accel-only` to get the new URL |
 | `ICECHUNK_DB` lacks `CORTEX_USER` | Agent tool fails with Cortex permission error | `GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE ICECHUNK_DB;` |
 | EAI dropped after spec update | ALTER FROM SPECIFICATION resets EAIs | Re-run `ALTER SERVICE SET EXTERNAL_ACCESS_INTEGRATIONS` |
 | UK 3D var not found in repo | 3D var not ingested (large files, opt-in) | Use DataLoader UK tab or `ICECHUNK_SEED_UK_VARS(json)` |

@@ -3,23 +3,11 @@ spec:
   - name: icechunk-accelerator
     image: /icechunk_db/icechunk/icechunk_repo/icechunk-accelerator:latest
     env:
-      PORT: "3001"
-      SNOWFLAKE_DATABASE: "ICECHUNK_DB"
-      SNOWFLAKE_SCHEMA: "ICECHUNK"
-      SNOWFLAKE_WAREHOUSE: "XSMALL"
-      SNOWFLAKE_ACCOUNT: "sfsehol-internal_marketplace"
-      SNOWFLAKE_HOST: "sfsehol-internal-marketplace.snowflakecomputing.com"
-    resources:
-      requests:
-        memory: 1Gi
-        cpu: 500m
-      limits:
-        memory: 2Gi
-        cpu: 1000m
+      ICECHUNK_SERVICE_URL: http://icechunk-service:8080
     readinessProbe:
       port: 3001
-      path: /api/health
+      path: /healthz
   endpoints:
-  - name: ui
+  - name: http-endpoint
     port: 3001
     public: true
