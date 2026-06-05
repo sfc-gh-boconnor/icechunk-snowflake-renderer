@@ -359,9 +359,15 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     // For UK grid mode use the actual ~2km spacing to estimate cell count;
     // the global estimator uses 10km spacing and underestimates by ~25x.
     const ukGrid = dataset === 'uk' && renderMode === 'points'
+    const latStepLocal = meta?.grid
+      ? (meta.grid.lat_range[1] - meta.grid.lat_range[0]) / (meta.grid.lat_count - 1)
+      : (dataset === 'uk' ? 0.019 : 0.09)
+    const lonStepLocal = meta?.grid
+      ? (meta.grid.lon_range[1] - meta.grid.lon_range[0]) / (meta.grid.lon_count - 1)
+      : (dataset === 'uk' ? 0.032 : 0.09)
     const cellCount = ukGrid
-      ? Math.ceil((bbox.latMax - bbox.latMin) / 0.019) *
-        Math.ceil((bbox.lonMax - bbox.lonMin) / 0.032)
+      ? Math.ceil((bbox.latMax - bbox.latMin) / latStepLocal) *
+        Math.ceil((bbox.lonMax - bbox.lonMin) / lonStepLocal)
       : estimateCellCount(bbox.latMin, bbox.latMax, bbox.lonMin, bbox.lonMax)
     // Backend auto-strides large UK requests, so check effective post-stride count.
     const stride = ukGrid && cellCount > TARGET_UK_RAW
@@ -520,15 +526,21 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   // - 2D + H3 mode → H3HexagonLayer (h3index comes from Python backend)
   // - 2D + grid mode → SolidPolygonLayer (degree-based rectangles matching native grid spacing)
   //
-  // Global 10km: ~0.09° spacing → half-extents 0.045° × 0.045°
-  // UK 2km:  lat range 18.85° / 970 rows ≈ 0.019°, lon range 33.73° / 1042 cols ≈ 0.032°
-  //
+  // Grid step is derived from metadata (lat_count, lon_count, lat_range, lon_range).
+  // Falls back to known dataset defaults while meta is still loading.
+  const latStep = meta?.grid
+    ? (meta.grid.lat_range[1] - meta.grid.lat_range[0]) / (meta.grid.lat_count - 1)
+    : (dataset === 'uk' ? 0.019 : 0.09)
+  const lonStep = meta?.grid
+    ? (meta.grid.lon_range[1] - meta.grid.lon_range[0]) / (meta.grid.lon_count - 1)
+    : (dataset === 'uk' ? 0.032 : 0.09)
+
   // Auto-stride: backend subsamples the UK grid by stride = ceil(sqrt(n/TARGET_UK_RAW))
   // when the bbox would return more than TARGET_UK_RAW raw cells. We compute the same
   // stride here so the SolidPolygonLayer cells are scaled to fill the gaps.
   const ukEstimate = dataset === 'uk' && renderMode === 'points'
-    ? Math.ceil((bbox.latMax - bbox.latMin) / 0.019) *
-      Math.ceil((bbox.lonMax - bbox.lonMin) / 0.032)
+    ? Math.ceil((bbox.latMax - bbox.latMin) / latStep) *
+      Math.ceil((bbox.lonMax - bbox.lonMin) / lonStep)
     : 0
   const ukStride = ukEstimate > TARGET_UK_RAW
     ? Math.max(1, Math.ceil(Math.sqrt(ukEstimate / TARGET_UK_RAW)))
@@ -537,8 +549,9 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   // Multiply by 1.015 (global) / 1.001 (UK) to fill hairline gaps between cells.
   // Global: WebGL sub-pixel gaps show the dark basemap → need more overlap.
   // UK: curvilinear cells tile tightly already → minimal overlap avoids white seams.
-  const halfDegLat = (dataset === 'uk' ? 0.0097 * ukStride : 0.045) * (dataset === 'uk' ? 1.001 : 1.015)
-  const halfDegLon = (dataset === 'uk' ? 0.0162 * ukStride : 0.045) * (dataset === 'uk' ? 1.001 : 1.015)
+  const overlap = dataset === 'uk' ? 1.001 : 1.015
+  const halfDegLat = (latStep / 2) * (dataset === 'uk' ? ukStride : 1) * overlap
+  const halfDegLon = (lonStep / 2) * (dataset === 'uk' ? ukStride : 1) * overlap
 
   // Active colour scale — override with named palette if selected
   const activeColorScale = colorScheme === 'auto'
@@ -704,8 +717,8 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
 
   const isUkGrid = dataset === 'uk' && renderMode === 'points'
   const ukRawEstimate = isUkGrid
-    ? Math.ceil((bbox.latMax - bbox.latMin) / 0.019) *
-      Math.ceil((bbox.lonMax - bbox.lonMin) / 0.032)
+    ? Math.ceil((bbox.latMax - bbox.latMin) / latStep) *
+      Math.ceil((bbox.lonMax - bbox.lonMin) / lonStep)
     : 0
   const displayStride = ukRawEstimate > TARGET_UK_RAW
     ? Math.max(1, Math.ceil(Math.sqrt(ukRawEstimate / TARGET_UK_RAW)))
