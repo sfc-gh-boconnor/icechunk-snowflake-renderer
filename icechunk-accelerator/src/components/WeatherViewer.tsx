@@ -31,10 +31,13 @@ import {
 
 const QUERY_DB = 'ICECHUNK_DB'
 const QUERY_SCHEMA = 'ICECHUNK'
-const MAX_CELLS = 500_000
-// TARGET_UK_RAW: backend auto-strides UK raw queries to stay under this count
-// (keeps Snowflake external function responses within ~10MB).
-const TARGET_UK_RAW = 80_000
+const MAX_CELLS = 1_500_000
+// TARGET_UK_RAW: backend auto-strides UK raw surface queries to stay under this count.
+// Full UK 2km grid is ~1,011,000 cells — raised to allow native resolution for surface 2D.
+const TARGET_UK_RAW = 1_200_000
+// TARGET_UK_LEVEL_RAW: lower limit for 3D level pre-fetch to avoid loading
+// 33 levels × 1M cells into the browser cache simultaneously.
+const TARGET_UK_LEVEL_RAW = 200_000
 
 /**
  * Map DeckGL zoom level to an H3 resolution that produces hex cells
@@ -369,18 +372,16 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
       ? Math.ceil((bbox.latMax - bbox.latMin) / latStepLocal) *
         Math.ceil((bbox.lonMax - bbox.lonMin) / lonStepLocal)
       : estimateCellCount(bbox.latMin, bbox.latMax, bbox.lonMin, bbox.lonMax)
-    // Backend auto-strides large UK requests, so check effective post-stride count.
+    // Backend auto-strides large UK requests to keep under TARGET_UK_RAW.
+    // With TARGET_UK_RAW = 1,200,000 the full UK grid (~1,011,000 cells) is
+    // returned at native 2km resolution with no striding.
     const stride = ukGrid && cellCount > TARGET_UK_RAW
       ? Math.max(1, Math.ceil(Math.sqrt(cellCount / TARGET_UK_RAW)))
       : 1
     const effectiveCells = ukGrid ? Math.ceil(cellCount / (stride * stride)) : cellCount
-    const limit = ukGrid ? TARGET_UK_RAW * 2 : MAX_CELLS
-    if (effectiveCells > limit) {
-      setError(
-        ukGrid
-          ? `UK grid area too large (~${effectiveCells.toLocaleString()} effective cells). Zoom in or use H3 mode.`
-          : `Selection too large (~${cellCount.toLocaleString()} cells). Narrow your bounding box.`
-      )
+    // Only block global queries that are truly enormous; UK grid mode is unrestricted.
+    if (!ukGrid && effectiveCells > MAX_CELLS) {
+      setError(`Selection too large (~${cellCount.toLocaleString()} cells). Narrow your bounding box.`)
       return
     }
     setError(null)
@@ -535,15 +536,17 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     ? (meta.grid.lon_range[1] - meta.grid.lon_range[0]) / (meta.grid.lon_count - 1)
     : (dataset === 'uk' ? 0.032 : 0.09)
 
-  // Auto-stride: backend subsamples the UK grid by stride = ceil(sqrt(n/TARGET_UK_RAW))
-  // when the bbox would return more than TARGET_UK_RAW raw cells. We compute the same
-  // stride here so the SolidPolygonLayer cells are scaled to fill the gaps.
+  // Auto-stride: backend subsamples the UK grid to keep under the target count.
+  // Surface 2D uses TARGET_UK_RAW (1.2M) → full UK returned at native 2km with no stride.
+  // 3D level uses TARGET_UK_LEVEL_RAW (200K) → limited per-level to keep 33-level
+  // pre-fetch cache from using excessive browser memory.
+  const ukTarget = varMeta.is3D ? TARGET_UK_LEVEL_RAW : TARGET_UK_RAW
   const ukEstimate = dataset === 'uk' && renderMode === 'points'
     ? Math.ceil((bbox.latMax - bbox.latMin) / latStep) *
       Math.ceil((bbox.lonMax - bbox.lonMin) / lonStep)
     : 0
-  const ukStride = ukEstimate > TARGET_UK_RAW
-    ? Math.max(1, Math.ceil(Math.sqrt(ukEstimate / TARGET_UK_RAW)))
+  const ukStride = ukEstimate > ukTarget
+    ? Math.max(1, Math.ceil(Math.sqrt(ukEstimate / ukTarget)))
     : 1
 
   // Multiply by 1.015 (global) / 1.001 (UK) to fill hairline gaps between cells.
@@ -720,8 +723,8 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     ? Math.ceil((bbox.latMax - bbox.latMin) / latStep) *
       Math.ceil((bbox.lonMax - bbox.lonMin) / lonStep)
     : 0
-  const displayStride = ukRawEstimate > TARGET_UK_RAW
-    ? Math.max(1, Math.ceil(Math.sqrt(ukRawEstimate / TARGET_UK_RAW)))
+  const displayStride = ukRawEstimate > ukTarget
+    ? Math.max(1, Math.ceil(Math.sqrt(ukRawEstimate / ukTarget)))
     : 1
   const cellCount = isUkGrid
     ? Math.ceil(ukRawEstimate / (displayStride * displayStride))

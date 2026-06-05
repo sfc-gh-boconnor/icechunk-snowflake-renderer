@@ -89,7 +89,7 @@ def _get_coords(root: zarr.Group):
     return lat, lon
 
 
-MAX_RAW_UK_CELLS = 80_000  # target raw point count before auto-striding kicks in
+MAX_RAW_UK_CELLS = 1_200_000  # target before auto-striding; full UK 2km grid is ~1,011,000 cells
 
 
 def _slice_2d_curvilinear(
@@ -119,7 +119,7 @@ def _slice_2d_curvilinear(
     if n_cells == 0:
         return {"data": [], "row_count": 0, "variable": variable,
                 "message": "No data in requested lat/lon range"}
-    if n_cells > 500_000:
+    if n_cells > 1_500_000:
         raise HTTPException(status_code=400,
             detail=f"Slice too large ({n_cells} cells). Narrow lat/lon range.")
 
@@ -238,7 +238,7 @@ class SliceRequest(BaseModel):
     lon_min: float = -10.0
     lon_max: float =  10.0
     snapshot_id: Optional[str] = None
-    max_cells: int = 500_000
+    max_cells: int = 1_500_000
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
@@ -648,9 +648,9 @@ def snowflake_cloud_level(payload: dict):
             if "cloud_height_levels" in root:
                 height_m = float(root["cloud_height_levels"][level_idx])
 
-            # Guard cell count
+            # Guard cell count (200K per level keeps 3D pre-fetch manageable)
             n_cells = (li_end - li_start) * (loi_end - loi_start)
-            if n_cells > 100_000:
+            if n_cells > 200_000:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Slice too large ({n_cells} cells). Narrow lat/lon range."
@@ -843,7 +843,7 @@ def snowflake_cloud_level_uk(payload: dict):
                      (lon2d >= lon_min) & (lon2d <= lon_max))
 
             n_cells = int(mask.sum())
-            if n_cells > 100_000:
+            if n_cells > 200_000:  # 200K per level keeps 3D pre-fetch manageable
                 raise HTTPException(status_code=400,
                     detail=f"Slice too large ({n_cells} cells). Narrow lat/lon range.")
 
@@ -1063,7 +1063,7 @@ def snowflake_level_slice_uk(payload: dict):
                      (lon2d >= lon_min) & (lon2d <= lon_max))
 
             n_cells = int(mask.sum())
-            if n_cells > 100_000:
+            if n_cells > 200_000:  # 200K per level keeps 3D pre-fetch manageable
                 raise HTTPException(status_code=400,
                     detail=f"Slice too large ({n_cells} cells). Narrow lat/lon range.")
 
