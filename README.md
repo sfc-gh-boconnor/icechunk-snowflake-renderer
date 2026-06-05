@@ -170,12 +170,13 @@ For 3D level queries, level_idx selects the height (metres) or pressure (Pa) sli
 |------|---------|
 | `server/index.ts` | Express: Snowflake REST API proxy (parallel partitions), CARTO tile proxy, Cortex Agent SSE proxy, ingest endpoints |
 | `src/App.tsx` | Root: agentFocusBbox state, wires AgentChat ↔ WeatherViewer |
-| `src/components/WeatherViewer.tsx` | DeckGL map: H3/Grid toggle, dataset/variable/snapshot/bbox/level controls, palette selector |
+| `src/components/WeatherViewer.tsx` | DeckGL map: H3/Grid toggle, dataset/variable/snapshot/bbox/level controls, palette selector, Refresh button, Table Analysis panel |
 | `src/components/AgentChat.tsx` | SSE streaming chat; fires onMapFocus(bbox) on tool results |
 | `src/components/DataLoader.tsx` | Global + UK ingest UI with per-variable selection |
 | `src/components/Home.tsx` | Home/landing screen |
 | `src/types.ts` | VARIABLES (surface + 3D), UK_INGEST_FILES, BBOX_PRESETS, DatasetConfig |
 | `src/shared/format.ts` | `PALETTES` (9 named colour schemes), value formatters |
+| **`deploy.sh`** | **Deploy script — always prints live app URL after every deploy** |
 
 ---
 
@@ -248,6 +249,18 @@ lonStep = (lon_range[1] - lon_range[0]) / (lon_count - 1)
 halfDegLat = (latStep / 2) * ukStride * overlap   // overlap = 1.015 global, 1.001 UK
 ```
 This is the same formula for both datasets. Falls back to 0.09° (global) / 0.019° lat (UK) only while metadata is loading on first render.
+
+---
+
+## Key Constraints
+
+### Snowflake 20 MB External Function Limit
+Snowflake service functions enforce a **20 MB HTTP response cap**. This is a platform constraint, not related to warehouse type or compute pool size. UK 2km grid mode with 1M+ cells exceeds this.
+
+**Fix**: UK surface grid queries go via a direct SPCS-internal HTTP call (`/api/direct/slice_uk` → `http://icechunk-service:8080/direct/slice_uk`), completely bypassing Snowflake. No 20 MB limit on this path.
+
+### Manual Refresh
+Data does **not** auto-load on bbox/variable/snapshot changes. Users press **↺ Load / Refresh** to trigger a fetch. This prevents accidental large queries on every pan/zoom.
 
 ---
 

@@ -73,7 +73,7 @@ Browser
 | `icechunk-accelerator/src/components/DataLoader.tsx` | Global + UK ingest UI with per-variable checkbox selection |
 | `icechunk-accelerator/src/types.ts` | VARIABLES (all surface + 3D), UK_INGEST_FILES, BBOX_PRESETS |
 | `build.sh` | `bash build.sh --bump patch` — builds both images |
-| `VERSION` | Semver (current: 1.0.43) |
+| `VERSION` | Semver (current: 1.0.52) |
 | `.cortex/skills/icechunk-accelerator/scripts/05_create_agent.sql` | WEATHER_AGENT + 3 tool procedures + grants |
 
 ---
@@ -98,8 +98,8 @@ Browser
 
 ```
 sfsehol-internal-marketplace.registry.snowflakecomputing.com/icechunk_db/icechunk/icechunk_repo/
-  icechunk-service:latest      (+ pinned :1.0.43)
-  icechunk-accelerator:latest  (+ pinned :1.0.43)
+  icechunk-service:latest      (+ pinned :1.0.46)
+  icechunk-accelerator:latest  (+ pinned :1.0.52)
 ```
 
 ---
@@ -147,6 +147,37 @@ The `LEVEL_COORD_MAP` in `main.py` maps each 3D variable to its zarr coordinate 
 `viridis`, `plasma`, `magma`, `inferno`, `coolwarm`, `rdbu`, `spectral`, `rainbow`, `greys`.
 
 `colorScheme` state in `WeatherViewer.tsx` defaults to `'auto'` (uses `varMeta.colorScale`). When a named palette is selected, `activeColorScale = PALETTES[colorScheme].scale` overrides the variable default. Palette swatches rendered below the legend.
+
+---
+
+## Snowflake 20 MB External Function Limit
+
+Snowflake external functions (service functions) enforce a **20 MB response cap** per call. This is a platform protocol constraint — unrelated to warehouse type, compute pool size, or CPU. An adaptive warehouse does NOT help.
+
+For UK 2km surface grid mode, returning 1M+ cells would exceed this limit. The fix bypasses it via a direct internal SPCS call:
+
+```
+Frontend → Express → http://icechunk-service:8080/direct/slice_uk  (no Snowflake, no 20 MB cap)
+```
+
+- Backend endpoints: `/direct/slice_uk` and `/direct/level_slice_uk` (no Snowflake wire format)
+- Express proxy routes: `/api/direct/slice_uk` and `/api/direct/level_slice_uk`
+- UK H3 mode and all global queries still use the Snowflake function path
+
+---
+
+## Manual Refresh (no auto-fetch)
+
+Data does NOT auto-load on bbox pan/zoom/variable change. Press **↺ Load / Refresh** to trigger a fetch. This prevents hammering the backend on every map interaction. 3D level pre-fetch also requires the Refresh button.
+
+---
+
+## Table Analysis Panel
+
+After saving data to a Snowflake table, a **📊 View & Analyse** button appears. This opens a full-screen overlay with:
+- **📋 Data Preview** — first 200 rows scrollable grid
+- **📈 Statistics** — per-variable MIN/MAX/AVG/STDDEV in display units
+- **❖ Ask Agent** — sends a pre-filled message to WEATHER_AGENT with table name, stats and bbox context
 
 ---
 

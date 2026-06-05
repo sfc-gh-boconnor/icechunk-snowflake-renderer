@@ -1378,12 +1378,15 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
 
       {/* ── Table Analysis Overlay ───────────────────────────────────────── */}
       {tableViewOpen && (
-        <div style={{
-          position: 'absolute', inset: 0, zIndex: 200,
-          background: 'rgba(13,17,23,0.96)',
-          display: 'flex', flexDirection: 'column',
-          fontFamily: 'Inter, sans-serif',
-        }}>
+        <div
+          onWheel={e => e.stopPropagation()}
+          onMouseDown={e => e.stopPropagation()}
+          style={{
+            position: 'absolute', inset: 0, zIndex: 200,
+            background: 'rgba(13,17,23,0.96)',
+            display: 'flex', flexDirection: 'column',
+            fontFamily: 'Inter, sans-serif',
+          }}>
           {/* Header */}
           <div style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
