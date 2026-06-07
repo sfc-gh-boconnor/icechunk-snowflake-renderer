@@ -914,6 +914,7 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           body: JSON.stringify({
             table_name:  tableName.trim(),
             snapshot_id: selectedSnapshot ?? null,
+            variables:   savableVars,
           }),
         })
         if (!res.body) throw new Error('No response body')
