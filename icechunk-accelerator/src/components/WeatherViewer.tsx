@@ -100,6 +100,12 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
   const [saving, setSaving] = useState(false)
   const [saveResult, setSaveResult] = useState<{ table: string; row_count: number } | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
+
+  // Full UK grid export state
+  const [exportingFull, setExportingFull] = useState(false)
+  const [exportFullStatus, setExportFullStatus] = useState<string | null>(null)
+  const [exportFullResult, setExportFullResult] = useState<{ table: string; row_count: number } | null>(null)
+  const [exportFullError, setExportFullError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [pivoted, setPivoted] = useState(false)   // false = long format, true = wide/pivoted
   const tableInputRef = useRef<HTMLInputElement>(null)
@@ -879,6 +885,72 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     }
   }
 
+  // Export the full UK grid (all surface variables, all 970K cells) via the
+  // auto-tiled SSE endpoint.  Streams status messages to the UI.
+  const handleExportFullUk = () => {
+    if (!tableName.trim() || exportingFull) return
+    setExportingFull(true)
+    setExportFullStatus('Starting full UK export…')
+    setExportFullResult(null)
+    setExportFullError(null)
+
+    const es = new EventSource(
+      '/api/export_full_uk?' +
+      new URLSearchParams({
+        table_name:  tableName.trim(),
+        snapshot_id: selectedSnapshot ?? '',
+      }),
+    )
+
+    // EventSource only supports GET; use fetch+SSE instead
+    es.close()
+
+    // Use fetch with SSE reading (POST with body)
+    void (async () => {
+      try {
+        const res = await fetch('/api/export_full_uk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            table_name:  tableName.trim(),
+            snapshot_id: selectedSnapshot ?? null,
+          }),
+        })
+        if (!res.body) throw new Error('No response body')
+        const reader = res.body.getReader()
+        const dec = new TextDecoder()
+        let buf = ''
+        let currentEvent = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += dec.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            if (line.startsWith('event: ')) { currentEvent = line.slice(7).trim(); continue }
+            if (!line.startsWith('data: ')) continue
+            const data = line.slice(6).trim()
+            if (!data) continue
+            try {
+              const parsed = JSON.parse(data) as Record<string, unknown>
+              if (currentEvent === 'status')  setExportFullStatus(parsed.label as string)
+              if (currentEvent === 'result') {
+                setExportFullResult({ table: parsed.table as string, row_count: parsed.row_count as number })
+                setExportFullStatus(null)
+              }
+              if (currentEvent === 'error')  setExportFullError(parsed.error as string)
+            } catch { /* skip malformed line */ }
+          }
+        }
+      } catch (err) {
+        setExportFullError(String(err))
+      } finally {
+        setExportingFull(false)
+      }
+    })()
+  }
+
   const handleCopyTable = () => {
     if (!saveResult) return
     navigator.clipboard.writeText(saveResult.table).then(() => {
@@ -1346,6 +1418,72 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
           {saveError && (
             <div style={{ marginTop: 6, fontSize: 11, color: 'var(--red)' }}>
               ⚠ {saveError}
+            </div>
+          )}
+
+          {/* ── Export Full UK Grid (UK dataset only) ────────────── */}
+          {dataset === 'uk' && (
+            <div style={{ marginTop: 14, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+              <div className="overlay-title" style={{ marginBottom: 4 }}>Export Full UK Grid to Table</div>
+              <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                Full domain · 49.5–61.5°N, –8.5–2.5°E · ~9.7M rows est.
+                (auto-tiled into 4 lat bands to bypass 20 MB limit)
+              </div>
+              <button
+                className="btn primary small"
+                style={{ width: '100%', justifyContent: 'center', background: 'var(--accent2, #0072B8)' }}
+                onClick={handleExportFullUk}
+                disabled={exportingFull || !tableName.trim()}
+                title={!tableName.trim() ? 'Enter a table name above first' : 'Export entire UK grid to Snowflake table'}
+              >
+                {exportingFull ? '⏳ Exporting…' : '↓ Export Full UK Grid'}
+              </button>
+
+              {/* Live status */}
+              {exportFullStatus && (
+                <div style={{ marginTop: 6, fontSize: 10, color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+                  {exportFullStatus}
+                </div>
+              )}
+
+              {/* Success */}
+              {exportFullResult && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 11, color: 'var(--green)', marginBottom: 4 }}>
+                    ✓ {exportFullResult.row_count.toLocaleString()} rows saved
+                  </div>
+                  <div style={{
+                    fontSize: 10, fontFamily: 'monospace',
+                    color: 'var(--text-secondary)',
+                    wordBreak: 'break-all', marginBottom: 6,
+                  }}>
+                    {exportFullResult.table}
+                  </div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <button
+                      className="btn secondary small"
+                      style={{ fontSize: 10, padding: '2px 8px' }}
+                      onClick={() => navigator.clipboard.writeText(exportFullResult.table)}
+                    >
+                      Copy name
+                    </button>
+                    <button
+                      className="btn primary small"
+                      style={{ fontSize: 10, padding: '2px 8px', flex: 1, justifyContent: 'center' }}
+                      onClick={() => fetchTableView(exportFullResult.table)}
+                    >
+                      📊 View & Analyse
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Error */}
+              {exportFullError && (
+                <div style={{ marginTop: 6, fontSize: 11, color: 'var(--red)' }}>
+                  ⚠ {exportFullError}
+                </div>
+              )}
             </div>
           )}
         </div>

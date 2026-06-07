@@ -577,6 +577,149 @@ GROUP BY lat, lon, h3_cell, snapshot_id`
   }
 })
 
+// ── Export Full UK Grid to Snowflake table (SSE streaming) ───────────────────
+//
+// Builds a CREATE TABLE AS SELECT with 4 lat-band tiles × N surface variables
+// (4 × N UNION ALL branches). Each tile is ~230K cells, safely under the 20 MB
+// external function response cap.  Streams SSE progress events back to the UI.
+//
+// SSE events:
+//   status → { label }          progress message
+//   result → { table, row_count, variables, tiles }  success
+//   error  → { error }          failure
+// ─────────────────────────────────────────────────────────────────────────────
+
+const UK_FULL_BBOX = { latMin: 49.5, latMax: 61.5, lonMin: -8.5, lonMax: 2.5 }
+
+// 4 equal lat bands — each ≈ 230K cells ≈ 17 MB per ICECHUNK_SLICE_UK call
+const UK_LAT_TILES = [
+  { min: 49.5, max: 52.5 },
+  { min: 52.5, max: 55.5 },
+  { min: 55.5, max: 58.5 },
+  { min: 58.5, max: 61.5 },
+]
+
+// Surface (2D) variables safe for ICECHUNK_SLICE_UK — excludes 3D vars and
+// coordinate arrays (height_levels, pressure_levels, cloud_height_levels)
+const UK_SURFACE_VARS = [
+  'wind_speed_at_10m', 'wind_gust_at_10m', 'rainfall_rate', 'snowfall_rate',
+  'visibility_at_screen_level', 'cloud_amount_of_total_cloud',
+  'cloud_amount_of_high_cloud', 'cloud_amount_of_medium_cloud',
+  'cloud_amount_of_low_cloud', 'air_temperature', 'relative_humidity',
+  'air_pressure_at_sea_level', 'dew_point_temperature', 'fog_fraction',
+  'lwe_precipitation_rate',
+]
+
+app.post('/api/export_full_uk', async (req: Request, res: Response) => {
+  const { table_name, snapshot_id, variables } = req.body as {
+    table_name?: string
+    snapshot_id?: string | null
+    variables?: string[]
+  }
+
+  if (!table_name || typeof table_name !== 'string') {
+    res.status(400).json({ error: 'Missing table_name' }); return
+  }
+
+  const safeName = table_name.replace(/[^A-Za-z0-9_]/g, '_').toUpperCase()
+  if (!safeName) { res.status(400).json({ error: 'Invalid table name' }); return }
+
+  // SSE setup
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
+  res.flushHeaders()
+
+  const emit = (event: string, data: unknown) =>
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+
+  // Filter to known surface vars only — caller may pass a subset
+  const vars = (variables?.length ? variables : UK_SURFACE_VARS)
+    .filter(v => UK_SURFACE_VARS.includes(v))
+
+  if (!vars.length) {
+    emit('error', { error: 'No valid surface variables to export' })
+    res.end(); return
+  }
+
+  const snapshotExpr = snapshot_id
+    ? `'${snapshot_id.replace(/'/g, "''")}'`
+    : 'NULL'
+
+  const nBranches = vars.length * UK_LAT_TILES.length
+  const estRows   = vars.length * 970_000
+
+  emit('status', {
+    label: `Building CTAS: ${vars.length} variables × ${UK_LAT_TILES.length} tiles = ${nBranches} branches…`,
+  })
+
+  // One SELECT branch per (variable, lat tile)
+  const branches = vars.flatMap(v => {
+    const safeVar = v.replace(/[^A-Za-z0-9_]/g, '')
+    return UK_LAT_TILES.map(tile => `
+  SELECT '${safeVar}'  AS variable,
+         f.value:lat::FLOAT   AS lat,
+         f.value:lon::FLOAT   AS lon,
+         H3_INT_TO_STRING(
+           H3_LATLNG_TO_CELL(f.value:lat::FLOAT, f.value:lon::FLOAT, 5)
+         ) AS h3_cell,
+         f.value:value::FLOAT AS value,
+         ${snapshotExpr}      AS snapshot_id,
+         CURRENT_TIMESTAMP()  AS created_at
+  FROM (SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SLICE_UK(
+          '${safeVar}',
+          ${tile.min}, ${tile.max},
+          ${UK_FULL_BBOX.lonMin}, ${UK_FULL_BBOX.lonMax},
+          ${snapshotExpr}
+        ) AS r) t,
+  LATERAL FLATTEN(input => t.r:data) f`)
+  })
+
+  const createSql =
+    `CREATE OR REPLACE TABLE ICECHUNK_DB.ICECHUNK.${safeName} AS\n` +
+    branches.join('\nUNION ALL\n')
+
+  console.log(
+    new Date().toISOString(),
+    `[/api/export_full_uk] Creating ICECHUNK_DB.ICECHUNK.${safeName}` +
+    ` (${vars.length} vars, ${UK_LAT_TILES.length} tiles, ~${estRows.toLocaleString()} rows est.)`,
+  )
+
+  emit('status', {
+    label: `Executing CTAS — ~${estRows.toLocaleString()} rows est. This may take several minutes…`,
+  })
+
+  try {
+    await runSql(createSql, 'ICECHUNK_DB', 'ICECHUNK')
+
+    emit('status', { label: 'Counting rows…' })
+    const countRows = await runSql(
+      `SELECT COUNT(*) AS n FROM ICECHUNK_DB.ICECHUNK.${safeName}`,
+      'ICECHUNK_DB', 'ICECHUNK',
+    ) as Record<string, unknown>[]
+    const rowCount = Number(countRows[0]?.N ?? countRows[0]?.n ?? 0)
+
+    console.log(
+      new Date().toISOString(),
+      `[/api/export_full_uk] Done: ${rowCount} rows in ICECHUNK_DB.ICECHUNK.${safeName}`,
+    )
+
+    emit('result', {
+      table:     `ICECHUNK_DB.ICECHUNK.${safeName}`,
+      row_count: rowCount,
+      variables: vars.length,
+      tiles:     UK_LAT_TILES.length,
+    })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(new Date().toISOString(), '[/api/export_full_uk]', msg)
+    emit('error', { error: msg })
+  }
+
+  res.end()
+})
+
 // ── Cortex Agent chat (SSE streaming) ─────────────────────────────────────────
 //
 // URL: /api/v2/databases/{DB}/schemas/{SCHEMA}/agents/{NAME}:run
