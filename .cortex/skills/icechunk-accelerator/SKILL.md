@@ -42,14 +42,18 @@ bash setup.sh                        # renders prefixed templates, creates secre
 snow spcs image-registry login -c <CONNECTION>
 bash build.sh --bump patch           # build + push both images to ICECHUNK_DB_<P>.ICECHUNK.ICECHUNK_REPO
 bash deploy.sh                        # CREATE-or-ALTER both services, re-apply EAIs, print app URL
-# then seed + agent:
+# functions MUST be created AFTER the services exist (service functions reference the running service):
+snow sql -c <CONNECTION> -f sql/_rendered/02_functions.sql
+# then seed (global + UK) + agent:
 snow sql -c <CONNECTION> -q "SELECT ICECHUNK_DB_<P>.ICECHUNK.ICECHUNK_SEED();"
+snow sql -c <CONNECTION> -q "SELECT ICECHUNK_DB_<P>.ICECHUNK.ICECHUNK_SEED_UK();"
 snow sql -c <CONNECTION> -f sql/_rendered/05_create_agent.sql
 ```
 
 - `names.sh` derives every prefixed name from `config.env`; `build.sh`/`deploy.sh`/`setup.sh` all source it so names never drift.
 - `build.sh` resolves the registry + repo path live from `SHOW IMAGE REPOSITORIES` (account-correct, no hardcoded registry).
 - Secrets are created inline by `setup.sh` from `config.env` and are NEVER written to a rendered file. `config.env` and `sql/_rendered/` are gitignored.
+- **Function ordering:** `setup.sh`/`01_snowflake_setup.sql` create infra + identity only (no functions). The 14 service functions (7 global + 7 UK) live in `02_functions.sql` and **must be run after `deploy.sh`** because Snowflake rejects a `SERVICE=` function before the service exists.
 - The `scripts/*.sql` files below remain as **reference**; the `.tmpl` versions are what `setup.sh` renders.
 
 ---
@@ -125,6 +129,8 @@ This creates:
 ```bash
 snow sql -f scripts/01_snowflake_setup.sql -c <CONNECTION>
 ```
+
+> **Note:** `01` creates infra + identity only. The 14 service functions (7 global + 7 UK) are in `scripts/02_functions.sql` and must be run **after** Step 3 (deploy services) — Snowflake rejects a `SERVICE=` function before the service exists.
 
 Before running, fill in the two AWS secrets at the top of the file:
 ```sql
@@ -347,6 +353,7 @@ All functions return VARIANT. Use `LATERAL FLATTEN(input => result:data)` to exp
 | Agent returns 0 chars | Hardcoded model not available | Set `models: orchestration: auto` in `05_create_agent.sql` |
 | Ingress URL stopped working / 404 | URL changed after `ALTER SERVICE FROM SPECIFICATION` | Run `SHOW ENDPOINTS IN SERVICE ICECHUNK_ACCELERATOR_SERVICE;` or `bash deploy.sh --accel-only` to get the new URL |
 | `ICECHUNK_DB` lacks `CORTEX_USER` | Agent tool fails with Cortex permission error | `GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE ICECHUNK_DB;` |
+| Agent tool: `Service ... ICECHUNK_SERVICE ... does not exist or not authorized` or `Service Endpoint 'http-endpoint' ... not authorized` | `05` creates `TOOL_WEATHER_*` procs as SYSADMIN (`USE ROLE SYSADMIN`), so EXECUTE AS OWNER = SYSADMIN — which lacks service/endpoint/function USAGE | Grant the backend service + its endpoint role + the tool functions to SYSADMIN (done by `02_functions.sql`): `GRANT USAGE ON SERVICE <db>.<schema>.ICECHUNK_SERVICE TO ROLE SYSADMIN; GRANT SERVICE ROLE <db>.<schema>.ICECHUNK_SERVICE!ALL_ENDPOINTS_USAGE TO ROLE SYSADMIN; GRANT USAGE ON FUNCTION ...ICECHUNK_META()/ICECHUNK_SLICE_H3(...) TO ROLE SYSADMIN;` |
 | EAI dropped after spec update | ALTER FROM SPECIFICATION resets EAIs | Re-run `ALTER SERVICE SET EXTERNAL_ACCESS_INTEGRATIONS` |
 | UK 3D var not found in repo | 3D var not ingested (large files, opt-in) | Use DataLoader UK tab or `ICECHUNK_SEED_UK_VARS(json)` |
 | Global cloud shows nothing after selecting var | `cloud_amount_on_height_levels` is in a separate snapshot | Select the `met_office_cloud_*` snapshot from the top-right Snapshot picker |
@@ -360,15 +367,22 @@ All functions return VARIANT. Use `LATERAL FLATTEN(input => result:data)` to exp
 
 ```
 scripts/
-  00_aws_setup.sh           AWS S3 bucket + IAM user + access keys
-  01_snowflake_setup.sql    DB, pool, secrets, EAIs, all service functions (global + UK)
+  00_aws_setup.sh           AWS S3 bucket + IAM user + access keys (legacy; see provision_aws.sh)
+  01_snowflake_setup.sql     DB, warehouse, pool, secrets, EAIs, role, user — infra + identity only (NO functions)
+  02_functions.sql           14 service functions (7 global + 7 UK) + grants — run AFTER services exist
   03_deploy_services.sql    SPCS CREATE SERVICE specs + mandatory EAI application
   04_load_data.sql          ICECHUNK_SEED() global trigger + verification
   05_create_agent.sql       WEATHER_AGENT + 3 tool procedures + grants
+  *.sql.tmpl                Prefixed templates rendered by setup.sh into sql/_rendered/ (DEPLOY_PREFIX flow)
 
 Project root (not in skill):
+  config.env.example        Template for config.env (DEPLOY_PREFIX, S3_BUCKET, AWS_REGION, ICECHUNK_CONNECTION)
+  names.sh                  Derives every prefixed object name from config.env (sourced by the scripts below)
+  provision_aws.sh          S3 bucket (if missing) + per-prefix IAM user scoped to <bucket>/<prefix>/*
+  setup.sh                  Renders prefixed .tmpl SQL, creates secrets inline, runs 01 infra
+  deploy.sh                 CREATE-or-ALTER both services, re-apply EAIs, print live app URL
   build.sh                  Docker buildx wrapper with --bump patch versioning
-  VERSION                   Semver file (1.0.43) updated by build.sh
+  VERSION                   Semver file (updated by build.sh)
   Dockerfile                Python FastAPI backend (icechunk-service)
   icechunk-accelerator/     React/Vite/Express frontend (icechunk-accelerator)
   app/                      Python FastAPI source:
