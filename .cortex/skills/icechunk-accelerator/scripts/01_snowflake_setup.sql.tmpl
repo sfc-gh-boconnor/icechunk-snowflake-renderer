@@ -1,0 +1,149 @@
+-- =============================================================================
+-- IceChunk Accelerator — Snowflake Infrastructure Setup  (TEMPLATE)
+-- =============================================================================
+-- Rendered by setup.sh via envsubst from config.env. DO NOT run directly.
+-- Every object is namespaced by DEPLOY_PREFIX so it cannot collide with other
+-- deployments on a SHARED Snowflake account.
+--
+-- Secrets are NOT created here — setup.sh creates them inline (never writes
+-- secret values to a rendered file).
+--
+-- Prerequisites: SYSADMIN + ACCOUNTADMIN.
+-- =============================================================================
+
+SET ICECHUNK_S3_BUCKET = '${S3_BUCKET}';
+SET ICECHUNK_S3_REGION = '${AWS_REGION}';
+SET ICECHUNK_S3_PREFIX = '${DEPLOY_PREFIX}/met_office_global';
+
+-- ---------------------------------------------------------------------------
+-- 1. DATABASE / SCHEMA
+-- ---------------------------------------------------------------------------
+USE ROLE SYSADMIN;
+
+CREATE DATABASE IF NOT EXISTS ${DB};
+CREATE SCHEMA  IF NOT EXISTS ${DB}.${SCHEMA};
+USE SCHEMA ${DB}.${SCHEMA};
+
+-- ---------------------------------------------------------------------------
+-- 2. WAREHOUSE
+-- ---------------------------------------------------------------------------
+CREATE WAREHOUSE IF NOT EXISTS ${WH}
+  WITH WAREHOUSE_SIZE  = 'SMALL'
+       AUTO_SUSPEND    = 60
+       AUTO_RESUME     = TRUE;
+
+-- ---------------------------------------------------------------------------
+-- 3. IMAGE REPOSITORY (for SPCS Docker images)
+-- ---------------------------------------------------------------------------
+CREATE IMAGE REPOSITORY IF NOT EXISTS ${DB}.${SCHEMA}.ICECHUNK_REPO;
+--   SHOW IMAGE REPOSITORIES IN SCHEMA ${DB}.${SCHEMA};  -> repository_url
+
+-- ---------------------------------------------------------------------------
+-- 4. COMPUTE POOL
+-- ---------------------------------------------------------------------------
+CREATE COMPUTE POOL IF NOT EXISTS ${POOL}
+  MIN_NODES         = 1
+  MAX_NODES         = 1
+  INSTANCE_FAMILY   = CPU_X64_XS
+  AUTO_RESUME       = TRUE
+  AUTO_SUSPEND_SECS = 600;
+-- Wait for IDLE/ACTIVE:  SHOW COMPUTE POOLS LIKE '${POOL}';
+
+-- ---------------------------------------------------------------------------
+-- 5. SECRETS — created inline by setup.sh (see note above). Not in this file.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- 6. NETWORK RULES
+-- ---------------------------------------------------------------------------
+USE ROLE ACCOUNTADMIN;
+
+-- 6a. IceChunk S3 store (read/write Zarr data)
+CREATE NETWORK RULE IF NOT EXISTS ${DB}.${SCHEMA}.ICECHUNK_S3_NETWORK_RULE
+  TYPE       = HOST_PORT
+  MODE       = EGRESS
+  VALUE_LIST = (
+    '${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com:443',
+    '${S3_BUCKET}.s3.amazonaws.com:443',
+    's3.${AWS_REGION}.amazonaws.com:443',
+    's3.amazonaws.com:443'
+  );
+
+-- 6b. Met Office ASDI (download public NetCDF source files during ingest)
+CREATE NETWORK RULE IF NOT EXISTS ${DB}.${SCHEMA}.MET_OFFICE_ASDI_RULE
+  TYPE       = HOST_PORT
+  MODE       = EGRESS
+  VALUE_LIST = (
+    'met-office-atmospheric-model-data.s3.eu-west-2.amazonaws.com:443',
+    's3.eu-west-2.amazonaws.com:443'
+  );
+
+-- 6c. CARTO basemap tiles (dark map background in the React frontend)
+CREATE NETWORK RULE IF NOT EXISTS ${DB}.${SCHEMA}.CARTO_TILES_RULE
+  TYPE       = HOST_PORT
+  MODE       = EGRESS
+  VALUE_LIST = (
+    'a.basemaps.cartocdn.com:443',
+    'b.basemaps.cartocdn.com:443',
+    'c.basemaps.cartocdn.com:443',
+    'd.basemaps.cartocdn.com:443'
+  );
+
+-- ---------------------------------------------------------------------------
+-- 7. EXTERNAL ACCESS INTEGRATIONS  (account-level — prefixed)
+-- ---------------------------------------------------------------------------
+CREATE EXTERNAL ACCESS INTEGRATION IF NOT EXISTS ${S3_EAI}
+  ALLOWED_NETWORK_RULES              = (${DB}.${SCHEMA}.ICECHUNK_S3_NETWORK_RULE)
+  ALLOWED_AUTHENTICATION_SECRETS     = (
+    ${DB}.${SCHEMA}.AWS_ACCESS_KEY_ID,
+    ${DB}.${SCHEMA}.AWS_SECRET_ACCESS_KEY
+  )
+  ENABLED = TRUE;
+
+CREATE EXTERNAL ACCESS INTEGRATION IF NOT EXISTS ${ASDI_EAI}
+  ALLOWED_NETWORK_RULES = (${DB}.${SCHEMA}.MET_OFFICE_ASDI_RULE)
+  ENABLED = TRUE;
+
+CREATE EXTERNAL ACCESS INTEGRATION IF NOT EXISTS ${TILES_EAI}
+  ALLOWED_NETWORK_RULES = (${DB}.${SCHEMA}.CARTO_TILES_RULE)
+  ENABLED = TRUE;
+
+USE ROLE SYSADMIN;
+
+-- ---------------------------------------------------------------------------
+-- 8. SERVICE FUNCTIONS — created in 02_functions.sql AFTER the services exist
+--    (this Snowflake version rejects a service function whose SERVICE is absent).
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- 9. GRANTS (infra + identity only; service/function grants live in 02)
+-- ---------------------------------------------------------------------------
+GRANT USAGE ON DATABASE ${DB} TO ROLE SYSADMIN;
+GRANT USAGE ON SCHEMA   ${DB}.${SCHEMA} TO ROLE SYSADMIN;
+GRANT USAGE ON COMPUTE POOL ${POOL} TO ROLE SYSADMIN;
+GRANT READ  ON SECRET ${DB}.${SCHEMA}.AWS_ACCESS_KEY_ID     TO ROLE SYSADMIN;
+GRANT READ  ON SECRET ${DB}.${SCHEMA}.AWS_SECRET_ACCESS_KEY TO ROLE SYSADMIN;
+
+-- ── Service identity role + user (prefixed) ───────────────────────────────────
+USE ROLE ACCOUNTADMIN;
+
+CREATE ROLE IF NOT EXISTS ${ROLE};
+CREATE USER IF NOT EXISTS ${SVC_USER}
+  DEFAULT_ROLE      = ${ROLE}
+  DEFAULT_WAREHOUSE = ${WH};
+
+GRANT ROLE ${ROLE} TO USER ${SVC_USER};
+
+USE ROLE SYSADMIN;
+
+GRANT USAGE ON DATABASE   ${DB}            TO ROLE ${ROLE};
+GRANT USAGE ON SCHEMA     ${DB}.${SCHEMA}  TO ROLE ${ROLE};
+GRANT USAGE ON WAREHOUSE  ${WH}            TO ROLE ${ROLE};
+
+-- Cortex AI access for the agent + tool procedures
+USE ROLE ACCOUNTADMIN;
+GRANT DATABASE ROLE SNOWFLAKE.CORTEX_USER TO ROLE ${ROLE};
+
+USE ROLE SYSADMIN;
+
+SELECT 'Infra setup complete for ${DB} — next: build.sh, deploy.sh, then 02_functions.sql' AS status;

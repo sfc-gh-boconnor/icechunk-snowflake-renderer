@@ -6,6 +6,28 @@ Met Office forecast data is stored as a versioned IceChunk Zarr store on S3 and 
 
 ---
 
+## Deploy (shared-account safe)
+
+A single knob, `DEPLOY_PREFIX` in `config.env`, namespaces **all** S3 objects and **all**
+Snowflake objects (database, warehouse, compute pool, EAIs, role/user, image repo,
+services, agent) so multiple people can deploy on the same account without collisions.
+
+```bash
+cp config.env.example config.env   # set DEPLOY_PREFIX, S3_BUCKET, AWS_REGION, ICECHUNK_CONNECTION
+bash provision_aws.sh              # bucket (if missing) + per-prefix IAM user; fills AWS keys in config.env
+bash setup.sh                      # prefixed DB/WH/pool/EAIs/secrets/functions (renders templates, inline secrets)
+snow spcs image-registry login -c <CONNECTION>
+bash build.sh --bump patch         # build + push images to ICECHUNK_DB_<PREFIX>.ICECHUNK.ICECHUNK_REPO
+bash deploy.sh                     # deploy both services + print app URL
+snow sql -c <CONNECTION> -q "SELECT ICECHUNK_DB_<PREFIX>.ICECHUNK.ICECHUNK_SEED();"   # load global data
+snow sql -c <CONNECTION> -f sql/_rendered/05_create_agent.sql                          # WEATHER_AGENT
+```
+
+`names.sh` derives the prefixed names from `config.env`; `config.env` and `sql/_rendered/`
+are gitignored (secrets never committed). Full playbook: `.cortex/skills/icechunk-accelerator/SKILL.md`.
+
+---
+
 ## Architecture
 
 ```

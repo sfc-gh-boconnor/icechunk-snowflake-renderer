@@ -293,17 +293,20 @@ app.get('/api/tiles/:z/:x/:y', (req: Request, res: Response) => {
 const ALLOWED_SQL = /^\s*(SELECT|SHOW|DESCRIBE|DESC|WITH|CALL)\b/i
 
 app.post('/api/query', async (req: Request, res: Response) => {
-  const { sql, database, schema } = req.body as {
+  const { sql, database: _ignoredDb, schema: _ignoredSchema } = req.body as {
     sql?: string; database?: string; schema?: string
   }
   if (!sql) { res.status(400).json({ error: 'Missing sql' }); return }
-  const trimmed = sql.trim()
+  // The React client still builds SQL against the literal ICECHUNK_DB.ICECHUNK.
+  // Rewrite it (and ignore any client-sent db/schema) so every query targets the
+  // prefixed, env-configured database/schema for this deployment.
+  const trimmed = sql.trim().replace(/ICECHUNK_DB\.ICECHUNK\./g, `${SF_DATABASE}.${SF_SCHEMA}.`)
   if (!ALLOWED_SQL.test(trimmed)) {
     res.status(400).json({ error: 'Only SELECT/SHOW/DESCRIBE/WITH/CALL allowed' })
     return
   }
   try {
-    const rows = await runSql(trimmed, database, schema)
+    const rows = await runSql(trimmed, SF_DATABASE, SF_SCHEMA)
     res.json({ result: rows })
   } catch (err) {
     console.error(new Date().toISOString(), '[/api/query]', String(err))
@@ -327,8 +330,8 @@ function parseTagLabel(tag: string): string | null {
 app.get('/api/snapshots', async (_req: Request, res: Response) => {
   try {
     const rows = await runSql(
-      `SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_META() AS result`,
-      'ICECHUNK_DB', 'ICECHUNK'
+      `SELECT ${SF_DATABASE}.${SF_SCHEMA}.ICECHUNK_META() AS result`,
+      SF_DATABASE, SF_SCHEMA
     ) as Record<string, unknown>[]
     const raw = rows[0]?.RESULT ?? rows[0]?.result
     const meta = typeof raw === 'string' ? JSON.parse(raw) : raw as {
@@ -402,14 +405,14 @@ app.post('/api/ingest_uk', async (_req: Request, res: Response) => {
   const selectedFiles = body?.selectedFiles
 
   const [sqlExpr, logTag] = selectedFiles?.length
-    ? [`SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED_UK_VARS('${JSON.stringify(selectedFiles).replace(/'/g, "''")}') AS result`,
+    ? [`SELECT ${SF_DATABASE}.${SF_SCHEMA}.ICECHUNK_SEED_UK_VARS('${JSON.stringify(selectedFiles).replace(/'/g, "''")}') AS result`,
        `ICECHUNK_SEED_UK_VARS (${selectedFiles.length} vars)`]
-    : [`SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED_UK() AS result`,
+    : [`SELECT ${SF_DATABASE}.${SF_SCHEMA}.ICECHUNK_SEED_UK() AS result`,
        'ICECHUNK_SEED_UK()']
 
   console.log(new Date().toISOString(), `[/api/ingest_uk] Calling ${logTag}`)
   try {
-    const rows = await runSql(sqlExpr, 'ICECHUNK_DB', 'ICECHUNK') as Record<string, unknown>[]
+    const rows = await runSql(sqlExpr, SF_DATABASE, SF_SCHEMA) as Record<string, unknown>[]
     const raw = rows[0]?.RESULT ?? rows[0]?.result ?? {}
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw as Record<string, unknown>
     const runStamp = parsed.run_stamp ?? parsed.tag ?? 'unknown'
@@ -435,8 +438,8 @@ app.post('/api/ingest', async (_req: Request, res: Response) => {
   console.log(new Date().toISOString(), '[/api/ingest] Calling ICECHUNK_SEED()')
   try {
     const rows = await runSql(
-      `SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SEED() AS result`,
-      'ICECHUNK_DB', 'ICECHUNK'
+      `SELECT ${SF_DATABASE}.${SF_SCHEMA}.ICECHUNK_SEED() AS result`,
+      SF_DATABASE, SF_SCHEMA
     ) as Record<string, unknown>[]
     const raw = rows[0]?.RESULT ?? rows[0]?.result ?? {}
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw as Record<string, unknown>
@@ -518,14 +521,14 @@ app.post('/api/save-table', async (req: Request, res: Response) => {
          f.value:value::FLOAT AS value,
          ${snapshotExpr}      AS snapshot_id,
          CURRENT_TIMESTAMP()  AS created_at
-  FROM (SELECT ICECHUNK_DB.ICECHUNK.${sliceFn}(
+  FROM (SELECT ${SF_DATABASE}.${SF_SCHEMA}.${sliceFn}(
           '${safeVar}', ${latMin}, ${latMax}, ${lonMin}, ${lonMax}, ${snapshotExpr}
         ) AS r) t,
   LATERAL FLATTEN(input => t.r:data) f`
   })
 
   // Long format: UNION ALL of all variable branches
-  const longSql = `CREATE OR REPLACE TABLE ICECHUNK_DB.ICECHUNK.${safeName} AS\n`
+  const longSql = `CREATE OR REPLACE TABLE ${SF_DATABASE}.${SF_SCHEMA}.${safeName} AS\n`
     + branches.join('\nUNION ALL\n')
 
   // Wide (pivoted) format: UNION ALL as a subquery, then conditional aggregation
@@ -537,7 +540,7 @@ app.post('/api/save-table', async (req: Request, res: Response) => {
     })
     .join(',\n')
 
-  const wideSql = `CREATE OR REPLACE TABLE ICECHUNK_DB.ICECHUNK.${safeName} AS
+  const wideSql = `CREATE OR REPLACE TABLE ${SF_DATABASE}.${SF_SCHEMA}.${safeName} AS
 SELECT lat,
        lon,
        h3_cell,
@@ -550,23 +553,23 @@ GROUP BY lat, lon, h3_cell, snapshot_id`
   const createSql = pivoted ? wideSql : longSql
 
   console.log(new Date().toISOString(),
-    `[/api/save-table] Creating ICECHUNK_DB.ICECHUNK.${safeName} (${variables.length} variables, ${pivoted ? 'wide/pivoted' : 'long'} format)`)
+    `[/api/save-table] Creating ${SF_DATABASE}.${SF_SCHEMA}.${safeName} (${variables.length} variables, ${pivoted ? 'wide/pivoted' : 'long'} format)`)
 
   try {
-    await runSql(createSql, 'ICECHUNK_DB', 'ICECHUNK')
+    await runSql(createSql, SF_DATABASE, SF_SCHEMA)
 
     // Count rows so we can report back to the UI
     const countRows = await runSql(
-      `SELECT COUNT(*) AS n FROM ICECHUNK_DB.ICECHUNK.${safeName}`,
-      'ICECHUNK_DB', 'ICECHUNK'
+      `SELECT COUNT(*) AS n FROM ${SF_DATABASE}.${SF_SCHEMA}.${safeName}`,
+      SF_DATABASE, SF_SCHEMA
     ) as Record<string, unknown>[]
     const rowCount = Number(countRows[0]?.N ?? countRows[0]?.n ?? 0)
 
     console.log(new Date().toISOString(),
-      `[/api/save-table] Done: ${rowCount} rows in ICECHUNK_DB.ICECHUNK.${safeName}`)
+      `[/api/save-table] Done: ${rowCount} rows in ${SF_DATABASE}.${SF_SCHEMA}.${safeName}`)
 
     res.json({
-      table: `ICECHUNK_DB.ICECHUNK.${safeName}`,
+      table: `${SF_DATABASE}.${SF_SCHEMA}.${safeName}`,
       row_count: rowCount,
       variables: variables.length,
     })
@@ -667,7 +670,7 @@ app.post('/api/export_full_uk', async (req: Request, res: Response) => {
          f.value:value::FLOAT AS value,
          ${snapshotExpr}      AS snapshot_id,
          CURRENT_TIMESTAMP()  AS created_at
-  FROM (SELECT ICECHUNK_DB.ICECHUNK.ICECHUNK_SLICE_UK(
+  FROM (SELECT ${SF_DATABASE}.${SF_SCHEMA}.ICECHUNK_SLICE_UK(
           '${safeVar}',
           ${tile.min}, ${tile.max},
           ${UK_FULL_BBOX.lonMin}, ${UK_FULL_BBOX.lonMax},
@@ -677,12 +680,12 @@ app.post('/api/export_full_uk', async (req: Request, res: Response) => {
   })
 
   const createSql =
-    `CREATE OR REPLACE TABLE ICECHUNK_DB.ICECHUNK.${safeName} AS\n` +
+    `CREATE OR REPLACE TABLE ${SF_DATABASE}.${SF_SCHEMA}.${safeName} AS\n` +
     branches.join('\nUNION ALL\n')
 
   console.log(
     new Date().toISOString(),
-    `[/api/export_full_uk] Creating ICECHUNK_DB.ICECHUNK.${safeName}` +
+    `[/api/export_full_uk] Creating ${SF_DATABASE}.${SF_SCHEMA}.${safeName}` +
     ` (${vars.length} vars, ${UK_LAT_TILES.length} tiles, ~${estRows.toLocaleString()} rows est.)`,
   )
 
@@ -691,22 +694,22 @@ app.post('/api/export_full_uk', async (req: Request, res: Response) => {
   })
 
   try {
-    await runSql(createSql, 'ICECHUNK_DB', 'ICECHUNK')
+    await runSql(createSql, SF_DATABASE, SF_SCHEMA)
 
     emit('status', { label: 'Counting rows…' })
     const countRows = await runSql(
-      `SELECT COUNT(*) AS n FROM ICECHUNK_DB.ICECHUNK.${safeName}`,
-      'ICECHUNK_DB', 'ICECHUNK',
+      `SELECT COUNT(*) AS n FROM ${SF_DATABASE}.${SF_SCHEMA}.${safeName}`,
+      SF_DATABASE, SF_SCHEMA,
     ) as Record<string, unknown>[]
     const rowCount = Number(countRows[0]?.N ?? countRows[0]?.n ?? 0)
 
     console.log(
       new Date().toISOString(),
-      `[/api/export_full_uk] Done: ${rowCount} rows in ICECHUNK_DB.ICECHUNK.${safeName}`,
+      `[/api/export_full_uk] Done: ${rowCount} rows in ${SF_DATABASE}.${SF_SCHEMA}.${safeName}`,
     )
 
     emit('result', {
-      table:     `ICECHUNK_DB.ICECHUNK.${safeName}`,
+      table:     `${SF_DATABASE}.${SF_SCHEMA}.${safeName}`,
       row_count: rowCount,
       variables: vars.length,
       tiles:     UK_LAT_TILES.length,
@@ -734,9 +737,9 @@ app.post('/api/export_full_uk', async (req: Request, res: Response) => {
 //   result   → {text, tool_results}      final answer complete
 //   error    → {error}                   error
 
-const AGENT_DB     = 'ICECHUNK_DB'
-const AGENT_SCHEMA = 'ICECHUNK'
-const AGENT_NAME   = 'WEATHER_AGENT'
+const AGENT_DB     = SF_DATABASE
+const AGENT_SCHEMA = SF_SCHEMA
+const AGENT_NAME   = process.env.WEATHER_AGENT_NAME ?? 'WEATHER_AGENT'
 
 app.post('/api/agent/chat', async (req: Request, res: Response) => {
   const { message, history = [] } = req.body as {

@@ -9,6 +9,13 @@ with H3 hexagon or grid-cell rendering, 3D level sliders for height and pressure
 level variables, and a Cortex Agent (WEATHER_AGENT) that answers natural-language
 weather questions and auto-focuses the map.
 
+> **Deployment is config-driven and shared-account safe.** All S3 + Snowflake objects
+> are namespaced by `DEPLOY_PREFIX` (in `config.env`): DB `ICECHUNK_DB_<P>`, warehouse
+> `ICECHUNK_WH_<P>`, pool `ICECHUNK_POOL_<P>`, EAIs `*_<P>`, role/user `ICECHUNK_ROLE_<P>`/
+> `ICECHUNK_<P>`, S3 under `<bucket>/<prefix>/`. Flow: `provision_aws.sh` → `setup.sh` →
+> `build.sh` → `deploy.sh`. `names.sh` derives every name; the frontend reads DB/schema
+> from `SNOWFLAKE_DATABASE`/`SNOWFLAKE_SCHEMA` env (not hardcoded). See SKILL.md.
+
 ---
 
 ## Architecture

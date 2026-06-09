@@ -13,6 +13,47 @@ End-to-end deployment of a weather data visualisation app on Snowflake Container
 
 ---
 
+## Shared-account safe: `config.env` + `DEPLOY_PREFIX` (READ FIRST)
+
+The target may be a **shared** Snowflake account (e.g. an SE builders workshop) where
+many people deploy this app. A single knob, `DEPLOY_PREFIX`, namespaces **both** S3
+objects and **all** Snowflake objects so nothing collides:
+
+| Thing | Without prefix (collides) | With `DEPLOY_PREFIX=<p>` |
+|-------|---------------------------|--------------------------|
+| Database | `ICECHUNK_DB` | `ICECHUNK_DB_<P>` (namespaces schema, image repo, secrets, functions, services, agent) |
+| Warehouse | `XSMALL` (generic!) | `ICECHUNK_WH_<P>` |
+| Compute pool | `ICECHUNK_COMPUTE_POOL` | `ICECHUNK_POOL_<P>` |
+| EAIs | `ICECHUNK_S3_EAI`, … | `ICECHUNK_S3_EAI_<P>`, `MET_OFFICE_ASDI_EAI_<P>`, `FLEET_INTEL_MAP_TILES_EAI_<P>` |
+| Role / User | `ICECHUNK_DB` / `ICECHUNK` | `ICECHUNK_ROLE_<P>` / `ICECHUNK_<P>` |
+| S3 Zarr | `s3://<bucket>/met_office_global/` | `s3://<bucket>/<p>/met_office_global/`, `<p>/met_office_uk_2km/` |
+| IAM user | shared | `<p>_icechunk_user` scoped to `s3://<bucket>/<p>/*` |
+
+`<P>` = uppercased `DEPLOY_PREFIX`. Schema stays `ICECHUNK` and the service objects keep
+their names (`ICECHUNK_SERVICE` / `ICECHUNK_ACCELERATOR_SERVICE`) — the unique DB isolates
+them, and intra-schema service DNS (`http://icechunk-service:8080`) is unaffected.
+
+### Config-driven deploy (canonical — supersedes manual SQL edits)
+
+```bash
+cp config.env.example config.env     # set DEPLOY_PREFIX, S3_BUCKET, AWS_REGION, ICECHUNK_CONNECTION
+bash provision_aws.sh                # bucket (if missing) + per-prefix IAM user; writes AWS keys into config.env
+bash setup.sh                        # renders prefixed templates, creates secrets inline, runs setup SQL
+snow spcs image-registry login -c <CONNECTION>
+bash build.sh --bump patch           # build + push both images to ICECHUNK_DB_<P>.ICECHUNK.ICECHUNK_REPO
+bash deploy.sh                        # CREATE-or-ALTER both services, re-apply EAIs, print app URL
+# then seed + agent:
+snow sql -c <CONNECTION> -q "SELECT ICECHUNK_DB_<P>.ICECHUNK.ICECHUNK_SEED();"
+snow sql -c <CONNECTION> -f sql/_rendered/05_create_agent.sql
+```
+
+- `names.sh` derives every prefixed name from `config.env`; `build.sh`/`deploy.sh`/`setup.sh` all source it so names never drift.
+- `build.sh` resolves the registry + repo path live from `SHOW IMAGE REPOSITORIES` (account-correct, no hardcoded registry).
+- Secrets are created inline by `setup.sh` from `config.env` and are NEVER written to a rendered file. `config.env` and `sql/_rendered/` are gitignored.
+- The `scripts/*.sql` files below remain as **reference**; the `.tmpl` versions are what `setup.sh` renders.
+
+---
+
 ## Prerequisites
 
 - AWS CLI installed and configured

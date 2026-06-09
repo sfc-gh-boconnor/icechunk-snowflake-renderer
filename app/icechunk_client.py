@@ -1,16 +1,22 @@
 """
 icechunk_client.py — open/create Icechunk repositories on S3.
 
-Two repos are supported:
-  - Global 10km  (ICECHUNK_PREFIX, default met_office_global)
-  - UK 2km       (ICECHUNK_UK_PREFIX, default met_office_uk_2km)
+Bucket and prefixes come from the SPCS service spec (set by deploy.sh from
+config.env). They are namespaced by DEPLOY_PREFIX so multiple deployments never
+collide on shared storage, e.g.:
+  ICECHUNK_BUCKET    = icechunk-ro
+  ICECHUNK_PREFIX    = <deploy_prefix>/met_office_global   (Global 10km)
+  ICECHUNK_UK_PREFIX = <deploy_prefix>/met_office_uk_2km   (UK 2km)
+
+The defaults below are only a local-dev fallback; in SPCS the spec always
+supplies these env vars.
 """
 import os
 import icechunk
 from icechunk.storage import s3_storage
 
 BUCKET     = os.environ.get("ICECHUNK_BUCKET", "icechunk-ro")
-PREFIX     = os.environ.get("ICECHUNK_PREFIX", "climate_repo")
+PREFIX     = os.environ.get("ICECHUNK_PREFIX", "met_office_global")
 UK_PREFIX  = os.environ.get("ICECHUNK_UK_PREFIX", "met_office_uk_2km")
 REGION     = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
 

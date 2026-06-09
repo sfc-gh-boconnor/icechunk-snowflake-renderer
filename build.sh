@@ -16,10 +16,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+# shellcheck disable=SC1091
+source ./names.sh          # config.env -> ICECHUNK_CONNECTION, DB, SCHEMA, REPO_PATH ...
+
 VERSION_FILE="${SCRIPT_DIR}/VERSION"
-CONNECTION="${SNOW_CONNECTION:-internal-marketplace}"
-REGISTRY="sfsehol-internal-marketplace.registry.snowflakecomputing.com"
-REPO="icechunk_db/icechunk/icechunk_repo"
+CONNECTION="$ICECHUNK_CONNECTION"
+REPO_URL_OVERRIDE=""
 BUILD_SERVICE=true
 BUILD_ACCEL=true
 BUMP=""
@@ -28,7 +31,7 @@ DEPLOY=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --connection)   CONNECTION="$2"; shift 2 ;;
-    --registry)     REGISTRY="$2";   shift 2 ;;
+    --repo-url)     REPO_URL_OVERRIDE="$2"; shift 2 ;;
     --service-only) BUILD_ACCEL=false;   shift ;;
     --accel-only)   BUILD_SERVICE=false; shift ;;
     --bump)         BUMP="$2";           shift 2 ;;
@@ -54,8 +57,8 @@ fi
 
 VERSION=$(cat "$VERSION_FILE" | tr -d '[:space:]')
 echo "=== IceChunk Accelerator Build — v${VERSION} ==="
-echo "  Registry:   $REGISTRY/$REPO"
 echo "  Connection: $CONNECTION"
+echo "  DB / repo:  ${DB}.${SCHEMA}.ICECHUNK_REPO"
 echo ""
 
 # ── Login ────────────────────────────────────────────────────────────────────
@@ -63,13 +66,41 @@ echo ">>> Authenticating with Snowflake registry..."
 snow spcs image-registry login --connection "$CONNECTION"
 echo ""
 
+# ── Resolve the prefixed image-repository URL from Snowflake ──────────────────
+# repository_url is "<host>/<db_lower>/<schema_lower>/icechunk_repo" — exactly
+# the prefixed path created by setup.sh. Derive it live so it's account-correct.
+if [[ -n "$REPO_URL_OVERRIDE" ]]; then
+  REPO_URL="$REPO_URL_OVERRIDE"
+else
+  REPO_URL="$(snow sql -c "$CONNECTION" --format json \
+    -q "SHOW IMAGE REPOSITORIES IN SCHEMA ${DB}.${SCHEMA};" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    rows = []
+for r in rows:
+    r = {k.lower(): v for k, v in r.items()}
+    if str(r.get('name','')).upper() == 'ICECHUNK_REPO':
+        print(r.get('repository_url',''))
+        break
+")"
+fi
+if [[ -z "${REPO_URL:-}" ]]; then
+  echo "ERROR: could not resolve ICECHUNK_REPO url in ${DB}.${SCHEMA}." >&2
+  echo "       Run 'bash setup.sh' first (it creates the image repository)." >&2
+  exit 1
+fi
+echo "  Repo URL:   $REPO_URL"
+echo ""
+
 # ── Build helper: tags both :VERSION and :latest ──────────────────────────────
 build_and_push() {
   local name="$1"
   local dockerfile="$2"
   local context="$3"
-  local versioned_tag="${REGISTRY}/${REPO}/${name}:${VERSION}"
-  local latest_tag="${REGISTRY}/${REPO}/${name}:latest"
+  local versioned_tag="${REPO_URL}/${name}:${VERSION}"
+  local latest_tag="${REPO_URL}/${name}:latest"
 
   echo ">>> Building ${name}:${VERSION}"
   docker buildx build \

@@ -437,6 +437,7 @@ export default function DataLoader() {
                 <button className="btn secondary small" onClick={selectUkNone}>None</button>
               </div>
             </div>
+            <div style={{ maxHeight: 300, overflowY: 'auto', paddingRight: 6 }}>
             {(['surface', 'height_levels', 'pressure_levels'] as UkIngestDim[]).map(dim => {
               const dimFiles = UK_INGEST_FILES.filter(f => f.dim === dim)
               const dimLabel: Record<UkIngestDim, string> = {
@@ -462,6 +463,7 @@ export default function DataLoader() {
                 </div>
               )
             })}
+            </div>
             <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
               Selected: {selectedUkFiles.size} variables — ~{ukTotalMb.toFixed(0)} MB download
             </div>
