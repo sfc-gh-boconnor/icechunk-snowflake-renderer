@@ -47,6 +47,11 @@ snow sql -c <CONNECTION> -f sql/_rendered/02_functions.sql
 # then seed (global + UK) + agent:
 snow sql -c <CONNECTION> -q "SELECT ICECHUNK_DB_<P>.ICECHUNK.ICECHUNK_SEED();"
 snow sql -c <CONNECTION> -q "SELECT ICECHUNK_DB_<P>.ICECHUNK.ICECHUNK_SEED_UK();"
+# OPTIONAL — add global 3D cloud (cloud_amount_on_height_levels) + surface cloud
+# fields. Run AFTER ICECHUNK_SEED() (seed uses zarr mode="w" and would wipe it).
+# Writes directly to S3 with the per-prefix IAM creds; needs Python 3.12 + icechunk==2.0.5:
+ICECHUNK_BUCKET="$S3_BUCKET" ICECHUNK_PREFIX="${DEPLOY_PREFIX}/met_office_global" \
+  AWS_DEFAULT_REGION="$AWS_REGION" python add_cloud_variables.py
 snow sql -c <CONNECTION> -f sql/_rendered/05_create_agent.sql
 ```
 
@@ -356,7 +361,8 @@ All functions return VARIANT. Use `LATERAL FLATTEN(input => result:data)` to exp
 | Agent tool: `Service ... ICECHUNK_SERVICE ... does not exist or not authorized` or `Service Endpoint 'http-endpoint' ... not authorized` | `05` creates `TOOL_WEATHER_*` procs as SYSADMIN (`USE ROLE SYSADMIN`), so EXECUTE AS OWNER = SYSADMIN — which lacks service/endpoint/function USAGE | Grant the backend service + its endpoint role + the tool functions to SYSADMIN (done by `02_functions.sql`): `GRANT USAGE ON SERVICE <db>.<schema>.ICECHUNK_SERVICE TO ROLE SYSADMIN; GRANT SERVICE ROLE <db>.<schema>.ICECHUNK_SERVICE!ALL_ENDPOINTS_USAGE TO ROLE SYSADMIN; GRANT USAGE ON FUNCTION ...ICECHUNK_META()/ICECHUNK_SLICE_H3(...) TO ROLE SYSADMIN;` |
 | EAI dropped after spec update | ALTER FROM SPECIFICATION resets EAIs | Re-run `ALTER SERVICE SET EXTERNAL_ACCESS_INTEGRATIONS` |
 | UK 3D var not found in repo | 3D var not ingested (large files, opt-in) | Use DataLoader UK tab or `ICECHUNK_SEED_UK_VARS(json)` |
-| Global cloud shows nothing after selecting var | `cloud_amount_on_height_levels` is in a separate snapshot | Select the `met_office_cloud_*` snapshot from the top-right Snapshot picker |
+| `Cloud by height (3D)` missing from Global variable selector | Global 3D cloud not ingested, OR the var isn't in the frontend `VARIABLES` array | (1) Run `add_cloud_variables.py` with `ICECHUNK_PREFIX=<prefix>/met_office_global` to add `cloud_amount_on_height_levels` to the repo; (2) ensure `cloud_amount_on_height_levels` (is3D:true) is in `src/types.ts` `VARIABLES` — the global selector filter is `(!v.is3D \|\| v.key === 'cloud_amount_on_height_levels')` |
+| Global cloud shows nothing after selecting var | `cloud_amount_on_height_levels` lives in a separate snapshot if seeded after `ICECHUNK_SEED()` wiped main | `add_cloud_variables.py` commits to main (append) so it usually works; if a later `ICECHUNK_SEED()` wiped it, select the `met_office_cloud_*` snapshot from the top-right Snapshot picker (or re-run `add_cloud_variables.py`) |
 | Global grid cells wrong size | Old hardcoded 0.09° — fixed in v1.0.43 | Redeploy; grid step now from `meta.grid.lat_count` / `lat_range` |
 | Partition rows empty | Missing `knownCols` in partition GET | `fetchPartition()` in `server/index.ts` must pass column metadata |
 | h5py pip install fails | Missing HDF5 libraries | Add `libhdf5-dev pkg-config` to Dockerfile apt install |

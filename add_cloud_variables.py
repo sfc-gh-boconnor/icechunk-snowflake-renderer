@@ -31,15 +31,42 @@ from botocore import UNSIGNED
 from botocore.config import Config
 
 # ── config ────────────────────────────────────────────────────────────────────
+# DEST_PREFIX must match the backend's ICECHUNK_PREFIX so the data lands in the
+# same Icechunk repo the SPCS service reads (e.g. "fsi_london/met_office_global"
+# on a shared/prefixed deployment). Defaults to the un-prefixed legacy path.
 DEST_BUCKET = os.environ.get("ICECHUNK_BUCKET", "icechunk-ro")
-DEST_PREFIX = "met_office_global"
+DEST_PREFIX = os.environ.get("ICECHUNK_PREFIX", "met_office_global")
 DEST_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
 AWS_KEY     = os.environ.get("AWS_ACCESS_KEY_ID")
 AWS_SECRET  = os.environ.get("AWS_SECRET_ACCESS_KEY")
 
 SRC_BUCKET  = "met-office-atmospheric-model-data"
 SRC_PREFIX  = "global-deterministic-10km"
-RUN_STAMP   = "20260602T0000Z"
+
+
+def _latest_cloud_stamp(max_days_back: int = 10) -> str:
+    """Find the most recent 0000Z run whose 3D cloud file exists on ASDI.
+    Override with ICECHUNK_RUN_STAMP (e.g. "20260609T0000Z")."""
+    forced = os.environ.get("ICECHUNK_RUN_STAMP")
+    if forced:
+        return forced
+    import datetime
+    probe = boto3.client("s3", region_name="eu-west-2",
+                         config=Config(signature_version=UNSIGNED))
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for d in range(0, max_days_back):
+        stamp = (now - datetime.timedelta(days=d)).strftime("%Y%m%dT0000Z")
+        key = f"{SRC_PREFIX}/{stamp}/{stamp}-PT0000H00M-cloud_amount_on_height_levels.nc"
+        try:
+            probe.head_object(Bucket=SRC_BUCKET, Key=key)
+            return stamp
+        except Exception:
+            continue
+    raise RuntimeError("No 3D cloud run found on ASDI in the last "
+                       f"{max_days_back} days.")
+
+
+RUN_STAMP   = _latest_cloud_stamp()
 
 # 2D surface cloud files
 CLOUD_2D = [
@@ -161,11 +188,18 @@ def main():
     snapshot_id = session.commit(
         f"Added cloud variables: 6 surface fields + height-level cloud — {RUN_STAMP}"
     )
-    repo.create_tag("met_office_cloud_20260602_T0000Z", snapshot_id=snapshot_id)
+    cloud_tag = f"met_office_cloud_{RUN_STAMP}"
+    try:
+        repo.create_tag(cloud_tag, snapshot_id=snapshot_id)
+    except Exception as e:
+        if "already exists" in str(e) or "immutable" in str(e):
+            print(f"  Tag '{cloud_tag}' already exists — skipping")
+        else:
+            print(f"  Tag '{cloud_tag}' creation failed: {e}")
 
     print(f"\n=== Done ===")
     print(f"Snapshot ID : {snapshot_id}")
-    print(f"Tag         : met_office_cloud_20260602_T0000Z")
+    print(f"Tag         : {cloud_tag}")
     new_vars = [v for _, v in CLOUD_2D] + [CLOUD_3D_VNAME]
     print(f"New variables: {new_vars}")
 

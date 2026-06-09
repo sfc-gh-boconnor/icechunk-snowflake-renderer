@@ -29,3 +29,4 @@ venv/
 # Cortex Code internal state (not needed by end users)
 .cortex/conversations/
 .snowflake/
+.venv_cloud/

@@ -317,6 +317,22 @@ export const VARIABLES: VariableMeta[] = [
     minHint: 0,
     maxHint: 50,
   },
+  {
+    key: 'cloud_amount_on_height_levels',
+    label: 'Cloud by height (3D)',
+    unit: '%',
+    is3D: true,
+    transform: v => v * 100,
+    colorScale: [
+      [13, 28, 64],
+      [40, 70, 130],
+      [100, 150, 200],
+      [180, 205, 230],
+      [245, 245, 245],
+    ],
+    minHint: 0,
+    maxHint: 100,
+  },
 ]
 
 export const VARIABLE_MAP: Record<string, VariableMeta> = Object.fromEntries(
