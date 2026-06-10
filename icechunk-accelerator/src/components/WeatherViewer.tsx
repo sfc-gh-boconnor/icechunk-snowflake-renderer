@@ -968,9 +968,20 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
     setTablePreview([])
     setTableStats([])
     try {
-      const [previewRows, statsRows] = await Promise.all([
-        sfQuery(`SELECT * FROM ${tableFqn} LIMIT 200`, QUERY_DB, QUERY_SCHEMA),
-        sfQuery(
+      // Step 1: preview (determines table format)
+      const previewRows = await sfQuery(`SELECT * FROM ${tableFqn} LIMIT 200`, QUERY_DB, QUERY_SCHEMA)
+      setTablePreview(previewRows)
+
+      // Step 2: detect long vs wide from column names
+      const NON_VAR = new Set(['LAT','LON','H3_CELL','SNAPSHOT_ID','CREATED_AT',
+                               'lat','lon','h3_cell','snapshot_id','created_at'])
+      const cols = Object.keys(previewRows[0] ?? {})
+      const isLong = cols.some(c => c === 'VARIABLE' || c === 'variable')
+
+      let statsRows: Record<string, unknown>[]
+      if (isLong) {
+        // Long format: full-table SQL stats
+        statsRows = await sfQuery(
           `SELECT variable,
                   COUNT(*)         AS n,
                   MIN(value)       AS min_val,
@@ -981,9 +992,26 @@ export default function WeatherViewer({ onMapContext, focusBbox, onFocusConsumed
            GROUP BY variable
            ORDER BY variable`,
           QUERY_DB, QUERY_SCHEMA
-        ),
-      ])
-      setTablePreview(previewRows)
+        )
+      } else {
+        // Wide format: one column per variable — compute stats from preview rows
+        const varCols = cols.filter(c => !NON_VAR.has(c))
+        statsRows = varCols.flatMap(col => {
+          const vals = previewRows
+            .map(r => r[col])
+            .filter(v => v != null && !isNaN(Number(v)))
+            .map(Number)
+          if (!vals.length) return []
+          const n = vals.length
+          const min_val = Math.min(...vals)
+          const max_val = Math.max(...vals)
+          const avg_val = vals.reduce((a, b) => a + b, 0) / n
+          const std_val = Math.sqrt(
+            vals.reduce((a, b) => a + (b - avg_val) ** 2, 0) / (n > 1 ? n - 1 : 1)
+          )
+          return [{ VARIABLE: col, N: n, MIN_VAL: min_val, MAX_VAL: max_val, AVG_VAL: avg_val, STD_VAL: std_val }]
+        })
+      }
       setTableStats(statsRows)
     } catch { /* non-critical */ }
     setTableViewLoading(false)
